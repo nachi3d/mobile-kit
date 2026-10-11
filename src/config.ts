@@ -26,6 +26,26 @@ export interface LanguageConfig {
   restore?: string;
 }
 
+export interface EmulatorConfig {
+  /** AVD name. Default "mk-pixel8-api34". */
+  avd: string;
+  /** avdmanager device id. Default "pixel_8". */
+  device: string;
+  /** sdkmanager package of the system image. */
+  image: string;
+  /** config.ini values set on every start: RAM (MB), data partition, keyboard. */
+  ramMb: number;
+  dataPartition: string;
+}
+
+export const EMULATOR_DEFAULTS: EmulatorConfig = {
+  avd: 'mk-pixel8-api34',
+  device: 'pixel_8',
+  image: 'system-images;android-34;google_apis_playstore;x86_64',
+  ramMb: 4096,
+  dataPartition: '8G',
+};
+
 export interface KitConfig {
   appName: string;
   androidPackage: string;
@@ -48,6 +68,8 @@ export interface KitConfig {
   modes: ('light' | 'dark')[];
   /** Android font scales. Default [1.0, 1.3]. */
   fontScales: number[];
+  /** `mk emulator` / `qa:device --emulator`. Every key optional. */
+  emulator: EmulatorConfig;
 }
 
 const REQUIRED = [
@@ -125,6 +147,15 @@ export function validateConfig(raw: unknown): string[] {
   ) {
     errors.push('"fontScales" is a list of numbers between 0.85 and 2, e.g. [1.0, 1.3]');
   }
+  if (raw.emulator !== undefined) {
+    const e = raw.emulator;
+    const ok =
+      isRecord(e) &&
+      ['avd', 'device', 'image'].every((k) => e[k] === undefined || (typeof e[k] === 'string' && /^[\w.;-]+$/.test(e[k] as string))) &&
+      (e.ramMb === undefined || (typeof e.ramMb === 'number' && e.ramMb >= 1024)) &&
+      (e.dataPartition === undefined || (typeof e.dataPartition === 'string' && /^\d+[MG]$/.test(e.dataPartition)));
+    if (!ok) errors.push('"emulator" is { "avd", "device", "image", "ramMb" (≥ 1024), "dataPartition" ("8G") }, every key optional');
+  }
   return errors;
 }
 
@@ -162,6 +193,7 @@ export function loadConfig(root: string): KitConfig {
     },
     modes: (c.modes as KitConfig['modes'] | undefined) ?? ['light', 'dark'],
     fontScales: (c.fontScales as number[] | undefined) ?? [1.0, 1.3],
+    emulator: { ...EMULATOR_DEFAULTS, ...((c.emulator as Partial<EmulatorConfig> | undefined) ?? {}) },
   };
 }
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { EMULATOR_USAGE, ensureEmulator, parseEmulatorArgs } from './emulator.js';
 import { KitError } from './log.js';
+import { openProject } from './project.js';
 import { qaDevice, QA_USAGE } from './qa/device.js';
 import { BUILD_USAGE, releaseBuild } from './release/build.js';
 import { PROMOTE_USAGE, releasePromote } from './release/promote.js';
@@ -9,6 +11,7 @@ const version = JSON.parse(fs.readFileSync(fileURLToPath(new URL('../package.jso
 const HELP = `mobile-kit ${version}: device QA and APK releases for Expo apps.
 
   ${QA_USAGE}
+  ${EMULATOR_USAGE}
   ${BUILD_USAGE}
   ${PROMOTE_USAGE}
 
@@ -44,6 +47,13 @@ async function main(argv) {
     switch (command) {
         case 'qa:device':
             return qaDevice(rest);
+        case 'emulator': {
+            const o = parseEmulatorArgs(rest);
+            const p = openProject({ dryRun: o.dryRun, requireDryRunInFixture: false });
+            const serial = await ensureEmulator(p, { wipe: o.wipe });
+            console.log(serial);
+            return;
+        }
         case 'release:build': {
             const a = releaseArgs(rest, BUILD_USAGE);
             return releaseBuild(a.positional, a.dryRun);

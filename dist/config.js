@@ -2,6 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fail } from './log.js';
 export const CONFIG_FILE = 'mobile-kit.config.json';
+export const EMULATOR_DEFAULTS = {
+    avd: 'mk-pixel8-api34',
+    device: 'pixel_8',
+    image: 'system-images;android-34;google_apis_playstore;x86_64',
+    ramMb: 4096,
+    dataPartition: '8G',
+};
 const REQUIRED = [
     'appName',
     'androidPackage',
@@ -80,6 +87,15 @@ export function validateConfig(raw) {
         (!Array.isArray(raw.fontScales) || !raw.fontScales.every((f) => typeof f === 'number' && f >= 0.85 && f <= 2))) {
         errors.push('"fontScales" is a list of numbers between 0.85 and 2, e.g. [1.0, 1.3]');
     }
+    if (raw.emulator !== undefined) {
+        const e = raw.emulator;
+        const ok = isRecord(e) &&
+            ['avd', 'device', 'image'].every((k) => e[k] === undefined || (typeof e[k] === 'string' && /^[\w.;-]+$/.test(e[k]))) &&
+            (e.ramMb === undefined || (typeof e.ramMb === 'number' && e.ramMb >= 1024)) &&
+            (e.dataPartition === undefined || (typeof e.dataPartition === 'string' && /^\d+[MG]$/.test(e.dataPartition)));
+        if (!ok)
+            errors.push('"emulator" is { "avd", "device", "image", "ramMb" (≥ 1024), "dataPartition" ("8G") }, every key optional');
+    }
     return errors;
 }
 export function loadConfig(root) {
@@ -119,6 +135,7 @@ export function loadConfig(root) {
         },
         modes: c.modes ?? ['light', 'dark'],
         fontScales: c.fontScales ?? [1.0, 1.3],
+        emulator: { ...EMULATOR_DEFAULTS, ...(c.emulator ?? {}) },
     };
 }
 /** Version, versionCode and package of the Expo app.json. */

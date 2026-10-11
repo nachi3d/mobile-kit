@@ -5,13 +5,15 @@ device QA with screenshots, and APK releases to Cloudflare R2. Each app
 keeps only a `mobile-kit.config.json` and its Maestro flows.
 
 ```
-mk qa:device [--apk <path>] [--skip-build] [--yes] [--no-open] [--dry-run]
+mk qa:device [--apk <path>] [--skip-build] [--emulator] [--yes] [--no-open] [--dry-run]
+mk emulator [--wipe] [--dry-run]
 mk release:build <version> [--dry-run]
 mk release:promote <version> [--dry-run]
 ```
 
 In an app these are npm scripts: `npm run qa:device`, `npm run
-release:build -- 0.3.0`, `npm run release:promote -- 0.3.0`.
+release:build -- 0.3.0`, `npm run release:promote -- 0.3.0`. The usual QA
+run is on the local emulator: `npm run qa:device -- --emulator --yes`.
 
 **Production safety.** `release:build` and `release:promote` write to R2
 and purge the Cloudflare cache. They are run by Seàn, or by an agent only
@@ -30,7 +32,10 @@ On the one connected phone or emulator:
    --wait --json`), downloaded to `dist/<apkName>-<version>-qa.apk`.
    `--skip-build` builds and installs nothing: it tests what is installed.
 2. **Device.** Exactly one device on `adb devices`, otherwise it stops with
-   help.
+   help. With `--emulator`:
+   - it refuses while a physical phone is connected (USB or Wi-Fi);
+   - otherwise it starts the local emulator like `mk emulator` (or reuses
+     it).
 3. **Data wipe check.** If a smoke flow uses `clearState` (it wipes the
    app's data), it asks first. `--yes` answers yes. Use an emulator or a
    test phone, not a phone with real data.
@@ -64,6 +69,26 @@ It exits non-zero if any smoke flow failed or any screenshot is missing.
   (e.g. `system`) is set at the end.
 - `deep-link` opens `languages.deepLink` with `{lang}` replaced (`adb
   shell am start -d …`); `languages.restore` works the same way.
+
+## `mk emulator [--wipe]`
+
+The local emulator for QA, idempotent:
+
+1. Creates the AVD if it is missing (`avdmanager create avd`). The
+   defaults are `mk-pixel8-api34`, device `pixel_8`, image
+   `system-images;android-34;google_apis_playstore;x86_64`.
+2. Sets its `config.ini` on every run: `hw.ramSize=4096M`,
+   `disk.dataPartition.size=8G`, `hw.keyboard=yes`.
+3. Starts it with a window, or reuses it if it is already running.
+   `--wipe` restarts it with `-wipe-data`.
+4. Waits for `sys.boot_completed=1`, unlocks the screen, keeps it on and
+   sets the window, transition and animator scales to 0 so Maestro runs
+   are stable.
+5. Prints its adb serial (`emulator-5554`).
+
+A cold boot takes about 2–3 minutes; a reused emulator about 20 s. Override
+the defaults with the config's `emulator` key:
+`{ "avd", "device", "image", "ramMb", "dataPartition" }`.
 
 ## `mk release:build <version>` / `mk release:promote <version>`
 
@@ -122,17 +147,42 @@ asks `Promote <version> to latest? [y/N]`. On `y` it:
    `%LOCALAPPDATA%\Android\Sdk`.
 4. **Java 17+** (Maestro needs it): `winget install Microsoft.OpenJDK.17`.
    Check: `java -version`.
-5. **Maestro.**
+5. **Android emulator** (for `--emulator`; skip it if you only test on a
+   phone). From the Android SDK folder (`%LOCALAPPDATA%\Android\Sdk`):
+   - **cmdline-tools.**
+     - Download `commandlinetools-win-*_latest.zip` from
+       developer.android.com/studio#command-line-tools-only.
+     - Unzip it so you get `cmdline-tools\latest\bin\avdmanager.bat`.
+   - **Packages.** Recent cmdline-tools replace `sdkmanager` with the
+     `android` CLI. Its package names use `/` instead of `;`:
+
+     ```
+     cmdline-tools\latest\bin\android.exe --no-metrics sdk install emulator platform-tools
+     cmdline-tools\latest\bin\android.exe --no-metrics sdk install system-images/android-34/google_apis_playstore/x86_64
+     ```
+   - **Acceleration.** `emulator\emulator.exe -accel-check` must say
+     "WHPX … is installed and usable".
+     - If not, enable **Windows Hypervisor Platform**: Windows Features,
+       or as admin
+       `Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform`,
+       then reboot.
+     - If it is still not usable, turn on CPU virtualization (Intel VT-x /
+       AMD-V) in the BIOS.
+   - **First start.** `mk emulator` creates the AVD on its first run.
+6. **Maestro.**
    - Download `maestro.zip` from github.com/mobile-dev-inc/maestro/releases
      (latest).
    - Unzip it to `%USERPROFILE%\.maestro`, so you have
      `%USERPROFILE%\.maestro\maestro\bin\maestro.bat`.
    - Add that `bin` folder to PATH and open a new terminal.
+   - Optional: set the user environment variable
+     `MAESTRO_CLI_NO_ANALYTICS=1` to turn off Maestro's anonymous
+     analytics.
    - Check: `maestro --version`.
-6. **Expo.** `npx eas-cli login`, or set `EXPO_TOKEN` in `.env.local`.
-7. **Cloudflare R2.** `npx wrangler login`, with an account that can write
+7. **Expo.** `npx eas-cli login`, or set `EXPO_TOKEN` in `.env.local`.
+8. **Cloudflare R2.** `npx wrangler login`, with an account that can write
    to the R2 bucket.
-8. **`.env.local`** in each app, git-ignored: copy `.env.local.example`.
+9. **`.env.local`** in each app, git-ignored: copy `.env.local.example`.
    Never commit or paste its values.
 
    | Name | What |

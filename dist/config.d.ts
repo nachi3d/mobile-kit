@@ -18,6 +18,18 @@ export interface LanguageConfig {
     /** "flow" / "deep-link": value set at the end, e.g. "system". */
     restore?: string;
 }
+export interface EmulatorConfig {
+    /** AVD name. Default "mk-pixel8-api34". */
+    avd: string;
+    /** avdmanager device id. Default "pixel_8". */
+    device: string;
+    /** sdkmanager package of the system image. */
+    image: string;
+    /** config.ini values set on every start: RAM (MB), data partition, keyboard. */
+    ramMb: number;
+    dataPartition: string;
+}
+export declare const EMULATOR_DEFAULTS: EmulatorConfig;
 export interface KitConfig {
     appName: string;
     androidPackage: string;
@@ -43,6 +55,8 @@ export interface KitConfig {
     modes: ('light' | 'dark')[];
     /** Android font scales. Default [1.0, 1.3]. */
     fontScales: number[];
+    /** `mk emulator` / `qa:device --emulator`. Every key optional. */
+    emulator: EmulatorConfig;
 }
 /** "AA:BB:…" or 40 hex digits → 40 lowercase hex digits, or null. */
 export declare function normalizeSha1(value: string): string | null;

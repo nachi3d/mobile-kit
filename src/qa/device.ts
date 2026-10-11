@@ -1,6 +1,7 @@
-// mk qa:device [--apk <path>] [--skip-build] [--yes] [--no-open] [--dry-run]
+// mk qa:device [--apk <path>] [--skip-build] [--emulator] [--yes] [--no-open] [--dry-run]
 //
-// Device QA on the one connected phone or emulator:
+// Device QA on the one connected phone or emulator (--emulator: the local
+// emulator, started if needed; refused while a physical phone is connected):
 //   1. APK: --apk, else an EAS build of the "qa" profile (--skip-build: no
 //      build and no install, test what is installed);
 //   2. adb install -r, then the installed versionCode must be app.json's;
@@ -22,6 +23,7 @@ import {
   getFontScale,
   getNightMode,
   installedVersionCode,
+  listDevices,
   requireOneDevice,
   screencap,
   setAppLocalesArgs,
@@ -31,24 +33,26 @@ import {
 } from '../android.js';
 import { isApk } from '../apk.js';
 import { easBuild } from '../eas.js';
+import { ensureEmulator, isEmulatorSerial } from '../emulator.js';
 import { act, run, type RunResult } from '../exec.js';
 import { detail, fail, info, KitError, warn } from '../log.js';
 import { openProject, type Project } from '../project.js';
 import { confirm } from '../prompt.js';
 import { renderReport, scaleLabel, type FlowResult, type QaRun, type Shot } from './report.js';
 
-export const QA_USAGE = 'Usage: mk qa:device [--apk <path>] [--skip-build] [--yes] [--no-open] [--dry-run]';
+export const QA_USAGE = 'Usage: mk qa:device [--apk <path>] [--skip-build] [--emulator] [--yes] [--no-open] [--dry-run]';
 
 export interface QaOptions {
   apk?: string;
   skipBuild: boolean;
+  emulator: boolean;
   yes: boolean;
   open: boolean;
   dryRun: boolean;
 }
 
 export function parseQaArgs(args: string[]): QaOptions {
-  const o: QaOptions = { skipBuild: false, yes: false, open: true, dryRun: false };
+  const o: QaOptions = { skipBuild: false, emulator: false, yes: false, open: true, dryRun: false };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--apk') {
@@ -56,6 +60,7 @@ export function parseQaArgs(args: string[]): QaOptions {
       if (!value) fail(`--apk needs a path. ${QA_USAGE}`);
       o.apk = value;
     } else if (a === '--skip-build') o.skipBuild = true;
+    else if (a === '--emulator') o.emulator = true;
     else if (a === '--yes') o.yes = true;
     else if (a === '--no-open') o.open = false;
     else if (a === '--dry-run') o.dryRun = true;
@@ -145,7 +150,18 @@ export async function qaDevice(args: string[]): Promise<void> {
   if (langFlow && !fs.existsSync(langFlow)) fail(`Language flow missing: ${config.maestroDir}/${config.languages.flow}`);
 
   // --- Device --------------------------------------------------------------
-  const serial = requireOneDevice(p.tool.adb);
+  let serial: string;
+  if (o.emulator) {
+    const physical = listDevices(p.tool.adb).ready.filter((d) => !isEmulatorSerial(d));
+    if (physical.length) {
+      fail(
+        `--emulator, but a physical device is connected: ${physical.join(', ')}. ` +
+          'Unplug it (or turn off wireless debugging): QA runs on the emulator only.',
+      );
+    }
+    const started = await ensureEmulator(p, { wipe: false });
+    serial = p.dryRun && listDevices(p.tool.adb).ready.length === 0 ? started : requireOneDevice(p.tool.adb);
+  } else serial = requireOneDevice(p.tool.adb);
   const device = deviceInfo(p.tool.adb, serial);
   info(`Device: ${device.manufacturer} ${device.model}, Android ${device.androidVersion} (API ${device.sdk}), ${serial}`);
 

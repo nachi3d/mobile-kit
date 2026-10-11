@@ -36,8 +36,10 @@ export interface Result {
 
 export interface Fixture {
   root: string;
+  avdHome: string;
   run(args: string[], env?: Record<string, string | undefined>, input?: string): Result;
   calls(): string;
+  resetCalls(): void;
   state(): Record<string, string>;
   write(file: string, content: string): void;
 }
@@ -58,6 +60,8 @@ export function makeFixture(
   const root = path.join(base, 'app');
   const log = path.join(base, 'calls.log');
   const stateFile = path.join(base, 'device.json');
+  const avdHome = path.join(base, 'avd');
+  fs.mkdirSync(avdHome);
   const write = (file: string, content: string) => {
     fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
     fs.writeFileSync(path.join(root, file), content);
@@ -87,6 +91,7 @@ export function makeFixture(
   const fake = (tool: string) => JSON.stringify([process.execPath, FAKE, tool]);
   return {
     root,
+    avdHome,
     write,
     run(args, env = {}, input = '') {
       const r = spawnSync(process.execPath, [CLI, ...args], {
@@ -107,6 +112,10 @@ export function makeFixture(
           MK_AAPT: fake('aapt'),
           MK_APKSIGNER: fake('apksigner'),
           MK_OPEN: fake('open'),
+          MK_EMULATOR: fake('emulator'),
+          MK_AVDMANAGER: fake('avdmanager'),
+          MK_POLL_MS: '20',
+          ANDROID_AVD_HOME: avdHome,
           FAKE_LOG: log,
           FAKE_STATE: stateFile,
           FAKE_PKG: 'com.example.app',
@@ -117,6 +126,7 @@ export function makeFixture(
       return { status: r.status, out: `${r.stdout}${r.stderr}` };
     },
     calls: () => fs.readFileSync(log, 'utf8'),
+    resetCalls: () => fs.writeFileSync(log, ''),
     state: () => (fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : {}),
   };
 }
@@ -131,7 +141,8 @@ export function sideEffects(calls: string): string[] {
         /^wrangler /.test(l) ||
         /^maestro /.test(l) ||
         /^open /.test(l) ||
-        /^adb .*( install | exec-out )/.test(l) ||
+        /^(emulator|avdmanager) /.test(l) ||
+        /^adb .*( install | exec-out |emu kill|settings put global|dismiss-keyguard)/.test(l) ||
         /^adb .*(uimode night \S|settings (put|delete)|set-app-locales)/.test(l) ||
         /^curl .*(-X POST|-o )/.test(l),
     );

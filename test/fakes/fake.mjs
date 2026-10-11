@@ -23,6 +23,7 @@ function state() {
     font_scale: env.FAKE_FONT_SCALE ?? 'null',
     locales: env.FAKE_LOCALES ?? '',
     versionCode: env.FAKE_INSTALLED_VC ?? '15',
+    emulator: env.FAKE_EMULATOR_RUNNING ?? '',
   };
   if (!env.FAKE_STATE) return initial;
   if (!fs.existsSync(env.FAKE_STATE)) fs.writeFileSync(env.FAKE_STATE, JSON.stringify(initial));
@@ -37,6 +38,24 @@ switch (tool) {
   case 'wrangler':
   case 'open':
     break;
+  case 'emulator': {
+    const s = state();
+    s.emulator = args[args.indexOf('-avd') + 1];
+    save(s);
+    break;
+  }
+  case 'avdmanager': {
+    if (failIf('avdmanager')) {
+      process.stderr.write('Error: Package path is not valid. Valid system image paths are: null\n');
+      process.exit(1);
+    }
+    const name = args[args.indexOf('-n') + 1];
+    const home = env.ANDROID_AVD_HOME;
+    fs.mkdirSync(`${home}/${name}.avd`, { recursive: true });
+    fs.writeFileSync(`${home}/${name}.ini`, `path=${home}/${name}.avd\n`);
+    fs.writeFileSync(`${home}/${name}.avd/config.ini`, 'hw.ramSize=2G\nhw.keyboard=no\ndisk.dataPartition.size=10G\nhw.device.name=pixel_8\n');
+    break;
+  }
   case 'curl': {
     if (args[0] === '-sI') {
       out(`HTTP/1.1 ${env.FAKE_HEAD_STATUS ?? '404'} Status\r\ncontent-length: ${env.FAKE_HEAD_LENGTH ?? '0'}\r\n\r\n`);
@@ -76,12 +95,20 @@ switch (tool) {
       out('List of devices attached\r\n');
       for (const d of (env.FAKE_ADB_DEVICES ?? '').split(' ').filter(Boolean)) out(`${d}\tdevice\r\n`);
       if (env.FAKE_ADB_UNAUTHORIZED) out(`${env.FAKE_ADB_UNAUTHORIZED}\tunauthorized\r\n`);
+      if (state().emulator) out('emulator-5554\tdevice\r\n');
       break;
     }
     const rest = args.slice(2); // after -s <serial>
     const cmd = rest.join(' ');
     const s = state();
-    if (rest[0] === 'install') {
+    if (rest[0] === 'emu') {
+      if (rest[1] === 'avd') out(`${s.emulator || 'other-avd'}\r\nOK\r\n`);
+      if (rest[1] === 'kill') {
+        s.emulator = '';
+        save(s);
+      }
+    } else if (cmd === 'shell getprop sys.boot_completed') out('1\n');
+    else if (rest[0] === 'install') {
       s.versionCode = env.FAKE_APK_VC ?? '16';
       save(s);
     } else if (rest[0] === 'exec-out') {
