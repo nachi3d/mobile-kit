@@ -1,8 +1,12 @@
-export declare const TOOLS: readonly ["eas", "wrangler", "curl", "adb", "maestro", "aapt", "apksigner", "open"];
+export declare const TOOLS: readonly ["eas", "wrangler", "curl", "adb", "maestro", "aapt", "apksigner", "open", "emulator", "avdmanager"];
 export type ToolName = (typeof TOOLS)[number];
 export declare const toolEnv: (tool: ToolName) => string;
+/** Android SDK folders that exist, in lookup order. */
+export declare function sdkRoots(env?: NodeJS.ProcessEnv): string[];
 /** Newest build-tools binary of the Android SDK, or null. */
 export declare function findBuildTool(name: string, env?: NodeJS.ProcessEnv): string | null;
+/** A binary at a fixed place in the SDK (emulator, cmdline-tools), or null. */
+export declare function findSdkTool(...parts: string[]): string | null;
 export declare function parseCommand(value: string): string[];
 /** The command line of a tool: injected (MK_*) or the default. */
 export declare function toolCommand(tool: ToolName, env?: NodeJS.ProcessEnv): string[];

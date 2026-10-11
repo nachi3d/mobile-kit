@@ -9,6 +9,8 @@
 //   MK_AAPT       default aapt2 of the newest Android SDK build-tools
 //   MK_APKSIGNER  default apksigner of the newest Android SDK build-tools
 //   MK_OPEN       default the OS "open this file" command
+//   MK_EMULATOR   default emulator of the Android SDK
+//   MK_AVDMANAGER default avdmanager of the SDK's cmdline-tools/latest
 //
 // A value is split on whitespace, or is a JSON array of strings when it
 // starts with "[" (for paths with spaces). An empty value means "missing"
@@ -19,23 +21,32 @@ import path from 'node:path';
 
 import { detail } from './log.js';
 
-export const TOOLS = ['eas', 'wrangler', 'curl', 'adb', 'maestro', 'aapt', 'apksigner', 'open'] as const;
+export const TOOLS = ['eas', 'wrangler', 'curl', 'adb', 'maestro', 'aapt', 'apksigner', 'open', 'emulator', 'avdmanager'] as const;
 export type ToolName = (typeof TOOLS)[number];
 
 export const toolEnv = (tool: ToolName) => `MK_${tool.toUpperCase()}`;
 
-/** Newest build-tools binary of the Android SDK, or null. */
-export function findBuildTool(name: string, env: NodeJS.ProcessEnv = process.env): string | null {
+/** Android SDK folders that exist, in lookup order. */
+export function sdkRoots(env: NodeJS.ProcessEnv = process.env): string[] {
   const home = env.HOME ?? env.USERPROFILE ?? '';
-  const sdks = [
+  const candidates = [
     env.ANDROID_HOME,
     env.ANDROID_SDK_ROOT,
     env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'Android', 'Sdk'),
     home && path.join(home, 'Android', 'Sdk'),
     home && path.join(home, 'Library', 'Android', 'sdk'),
   ];
-  for (const sdk of sdks) {
-    if (!sdk) continue;
+  return [...new Set(candidates.filter((c): c is string => !!c && fs.existsSync(c)))];
+}
+
+function existing(file: string): string | null {
+  for (const ext of ['', '.exe', '.bat']) if (fs.existsSync(file + ext)) return file + ext;
+  return null;
+}
+
+/** Newest build-tools binary of the Android SDK, or null. */
+export function findBuildTool(name: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  for (const sdk of sdkRoots(env)) {
     const dir = path.join(sdk, 'build-tools');
     if (!fs.existsSync(dir)) continue;
     const versions = fs
@@ -43,11 +54,18 @@ export function findBuildTool(name: string, env: NodeJS.ProcessEnv = process.env
       .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }))
       .reverse();
     for (const version of versions) {
-      for (const ext of ['', '.exe', '.bat']) {
-        const file = path.join(dir, version, name + ext);
-        if (fs.existsSync(file)) return file;
-      }
+      const file = existing(path.join(dir, version, name));
+      if (file) return file;
     }
+  }
+  return null;
+}
+
+/** A binary at a fixed place in the SDK (emulator, cmdline-tools), or null. */
+export function findSdkTool(...parts: string[]): string | null {
+  for (const sdk of sdkRoots()) {
+    const file = existing(path.join(sdk, ...parts));
+    if (file) return file;
   }
   return null;
 }
@@ -65,6 +83,14 @@ function defaultCommand(tool: ToolName): string[] {
     case 'apksigner': {
       const f = findBuildTool('apksigner');
       return f ? [f] : [];
+    }
+    case 'emulator': {
+      const f = findSdkTool('emulator', 'emulator');
+      return f ? [f] : ['emulator'];
+    }
+    case 'avdmanager': {
+      const f = findSdkTool('cmdline-tools', 'latest', 'bin', 'avdmanager');
+      return f ? [f] : ['avdmanager'];
     }
     case 'open':
       if (process.platform === 'win32') return ['explorer.exe'];

@@ -13,6 +13,12 @@ const qa = (f: Fixture, args: string[], env: Record<string, string | undefined> 
 
 const apkArgs = (f: Fixture) => ['--apk', path.join(f.root, 'dist', 'ExampleApp-0.2.0.apk')];
 
+/** The device settings and installed versionCode, without the emulator flag. */
+const settings = (f: Fixture) => {
+  const { emulator: _emulator, ...rest } = f.state();
+  return rest;
+};
+
 function captureDir(f: Fixture): string {
   const base = path.join(f.root, '.images', 'captures');
   const dirs = fs.readdirSync(base);
@@ -100,7 +106,7 @@ describe('mk qa:device with a fake device', () => {
     const r = qa(f, [...apkArgs(f), '--yes'], { FAKE_NIGHT: 'auto', FAKE_FONT_SCALE: '1.15', FAKE_LOCALES: 'en-GB' });
     assert.equal(r.status, 0, r.out);
     assert.ok(r.out.includes('Installed versionCode 16 = app.json'));
-    assert.deepEqual(f.state(), { night: 'auto', font_scale: '1.15', locales: 'en-GB', versionCode: '16' });
+    assert.deepEqual(settings(f), { night: 'auto', font_scale: '1.15', locales: 'en-GB', versionCode: '16' });
 
     const dir = captureDir(f);
     assert.match(path.basename(dir), /^\d{4}-\d{2}-\d{2}-v0\.2\.0$/);
@@ -149,7 +155,7 @@ describe('mk qa:device with a fake device', () => {
     const r = qa(f, [...apkArgs(f), '--yes', '--no-open'], { FAKE_FAIL: 'maestro:02-add,maestro:settings' });
     assert.notEqual(r.status, 0);
     assert.ok(r.out.includes('1 smoke flow(s) failed, 8 screenshot(s) missing'));
-    assert.deepEqual(f.state(), { night: 'no', font_scale: 'null', locales: '', versionCode: '16' });
+    assert.deepEqual(settings(f), { night: 'no', font_scale: 'null', locales: '', versionCode: '16' });
     const html = fs.readFileSync(path.join(captureDir(f), 'report.html'), 'utf8');
     assert.ok(html.includes('Smoke: 1/2 passed'));
     assert.ok(html.includes('Assertion is false: id: missing-thing is visible'));
@@ -161,7 +167,7 @@ describe('mk qa:device with a fake device', () => {
     const r = qa(f, [...apkArgs(f), '--yes', '--no-open'], { FAKE_FAIL: 'screencap', FAKE_NIGHT: 'yes', FAKE_LOCALES: 'fr-FR' });
     assert.notEqual(r.status, 0);
     assert.ok(r.out.includes('16 screenshot(s) missing'));
-    assert.deepEqual(f.state(), { night: 'yes', font_scale: 'null', locales: 'fr-FR', versionCode: '16' });
+    assert.deepEqual(settings(f), { night: 'yes', font_scale: 'null', locales: 'fr-FR', versionCode: '16' });
   });
 
   it('builds with the qa EAS profile and downloads the APK when no --apk is given', () => {
