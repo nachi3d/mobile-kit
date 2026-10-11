@@ -1,0 +1,28 @@
+{
+  "name": "@nachi3d/mobile-kit",
+  "version": "0.1.0",
+  "description": "Device QA (Maestro smoke flows + screenshot matrix) and APK releases to Cloudflare R2 for Nachi3D Labs' Expo apps.",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "mk": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "npm run build && node --test --test-concurrency=4 \"test/**/*.test.ts\"",
+    "check:dist": "npm run build && git diff --exit-code --stat -- dist"
+  },
+  "devDependencies": {
+    "@types/node": "~22.19.0",
+    "typescript": "~6.0.3"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}
