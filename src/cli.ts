@@ -54,7 +54,7 @@ async function main(argv: string[]): Promise<void> {
     case 'emulator': {
       const o = parseEmulatorArgs(rest);
       const p = openProject({ dryRun: o.dryRun, requireDryRunInFixture: false });
-      const serial = await ensureEmulator(p, { wipe: o.wipe });
+      const { serial } = await ensureEmulator(p, { wipe: o.wipe });
       console.log(serial);
       return;
     }

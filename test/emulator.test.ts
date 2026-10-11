@@ -23,7 +23,9 @@ describe('mk emulator', () => {
     assert.match(ini, /^disk\.dataPartition\.size=8G$/m);
     assert.match(ini, /^hw\.keyboard=yes$/m);
     assert.match(ini, /^hw\.device\.name=pixel_8$/m);
-    assert.match(calls, /^emulator -avd mk-pixel8-api34 -no-boot-anim -no-audio$/m);
+    assert.match(ini, /^hw\.gpu\.enabled=yes$/m);
+    assert.match(ini, /^hw\.gpu\.mode=host$/m);
+    assert.match(calls, /^emulator -avd mk-pixel8-api34 -no-boot-anim -no-audio -gpu host$/m);
     assert.match(calls, /getprop sys\.boot_completed/);
     assert.match(calls, /wm dismiss-keyguard/);
     for (const k of ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale']) {
@@ -49,7 +51,30 @@ describe('mk emulator', () => {
     const r = f.run(['emulator', '--wipe']);
     assert.equal(r.status, 0, r.out);
     assert.match(f.calls(), /emu kill/);
-    assert.match(f.calls(), /^emulator -avd mk-pixel8-api34 -no-boot-anim -no-audio -wipe-data$/m);
+    assert.match(f.calls(), /^emulator -avd mk-pixel8-api34 -no-boot-anim -no-audio -gpu host -wipe-data$/m);
+  });
+
+  it('falls back to swiftshader_indirect once when the host GPU does not boot', () => {
+    const f = makeFixture();
+    const r = f.run(['emulator'], { FAKE_FAIL: 'emulator:host' });
+    assert.equal(r.status, 0, r.out);
+    assert.ok(r.out.includes('GPU mode "host" did not boot: retrying once with swiftshader_indirect'));
+    assert.match(f.calls(), /^emulator .* -gpu host$/m);
+    assert.match(f.calls(), /^emulator .* -gpu swiftshader_indirect$/m);
+    // The config keeps host: the fallback is for this boot only.
+    assert.match(configIni(f.avdHome), /^hw\.gpu\.mode=host$/m);
+  });
+
+  it('stops with help when neither GPU mode boots', () => {
+    const r = makeFixture().run(['emulator'], { FAKE_FAIL: 'emulator:host,emulator:swiftshader_indirect' });
+    assert.notEqual(r.status, 0);
+    assert.ok(r.out.includes('did not start'));
+  });
+
+  it('headless and another GPU mode from the config', () => {
+    const f = makeFixture({ config: { emulator: { headless: true, gpu: 'angle_indirect' } } });
+    assert.equal(f.run(['emulator']).status, 0);
+    assert.match(f.calls(), /^emulator -avd mk-pixel8-api34 -no-boot-anim -no-audio -gpu angle_indirect -no-window$/m);
   });
 
   it('explains how to install the system image when avdmanager fails', () => {
@@ -97,7 +122,62 @@ describe('mk qa:device --emulator', () => {
     assert.equal(r.status, 0, r.out);
     assert.match(f.calls(), /^emulator -avd mk-pixel8-api34/m);
     assert.match(f.calls(), /^adb -s emulator-5554 install -r /m);
-    assert.ok(r.out.includes('Screenshots: 2 screens × 2 modes × 2 languages × 2 font scales = 16'));
+    assert.ok(r.out.includes('Screenshots: 2 screens × 2 modes = 4, in 2 batches'));
+  });
+
+  it('cold-restarts the emulator before each batch after the smoke flows, and stops it at the end', () => {
+    const f = makeFixture();
+    const apk = path.join(f.root, 'dist', 'ExampleApp-0.2.0.apk');
+    const r = f.run(['qa:device', '--emulator', '--apk', apk, '--yes', '--no-open']);
+    assert.equal(r.status, 0, r.out);
+    const boots = [...f.calls().matchAll(/^emulator .*$/gm)].map((m) => m[0]);
+    assert.equal(boots.length, 3);
+    assert.equal(boots.filter((b) => b.endsWith('-no-snapshot')).length, 2);
+    assert.equal([...f.calls().matchAll(/emu kill/g)].length, 3);
+    assert.ok(r.out.includes('Stopping the emulator (mk started it'));
+    assert.equal(f.state().emulator, '');
+  });
+
+  it('--keep-emulator leaves it running; an emulator mk did not start is never stopped', () => {
+    const f = makeFixture();
+    const apk = path.join(f.root, 'dist', 'ExampleApp-0.2.0.apk');
+    f.run(['qa:device', '--emulator', '--apk', apk, '--yes', '--no-open', '--keep-emulator']);
+    assert.equal(f.state().emulator, 'mk-pixel8-api34');
+    // Already running, and no screenshots: nothing restarted, nothing started by this run.
+    const g = makeFixture({ config: { screens: [] } });
+    const r = g.run(['qa:device', '--emulator', '--apk', path.join(g.root, 'dist', 'ExampleApp-0.2.0.apk'), '--yes', '--no-open'], {
+      FAKE_EMULATOR_RUNNING: 'mk-pixel8-api34',
+    });
+    assert.equal(r.status, 0, r.out);
+    assert.doesNotMatch(g.calls(), /emu kill/);
+    assert.equal(g.state().emulator, 'mk-pixel8-api34');
+  });
+
+  it('watchdog: low free RAM or a big emulator restarts it after the current capture, then continues', () => {
+    const f = makeFixture({ config: { modes: ['light'] } });
+    const apk = path.join(f.root, 'dist', 'ExampleApp-0.2.0.apk');
+    const r = f.run(['qa:device', '--emulator', '--apk', apk, '--yes', '--no-open'], { FAKE_MEM_SEQ: '1500:3000,8000:2000' });
+    assert.equal(r.status, 0, r.out);
+    assert.ok(r.out.includes('Memory: free RAM 1500 MB < 2048 MB: restarted the emulator before settings'));
+    // Initial boot, the batch restart after the smoke flows, the watchdog restart.
+    assert.equal([...f.calls().matchAll(/^emulator /gm)].length, 3);
+    const html = fs.readFileSync(path.join(f.root, '.images', 'captures', fs.readdirSync(path.join(f.root, '.images', 'captures'))[0]!, 'report.html'), 'utf8');
+    assert.ok(html.includes('Screenshots: 2/2'));
+    const big = makeFixture({ config: { modes: ['light'] } });
+    const r2 = big.run(['qa:device', '--emulator', '--apk', path.join(big.root, 'dist', 'ExampleApp-0.2.0.apk'), '--yes', '--no-open'], {
+      FAKE_MEM_SEQ: '9000:7000,9000:2000',
+    });
+    assert.ok(r2.out.includes('emulator uses 7000 MB > 6144 MB'));
+  });
+
+  it('kills the emulator processes when adb emu kill does not stop it', () => {
+    const f = makeFixture();
+    f.run(['emulator']);
+    f.resetCalls();
+    // A wedged emulator: adb emu kill does nothing, the processes must go.
+    const r = f.run(['emulator', '--wipe'], { FAKE_FAIL: 'emu-kill' });
+    assert.ok(r.out.includes('did not stop with "adb emu kill": killing its processes'));
+    assert.match(f.calls(), /^procs kill-emulator mk-pixel8-api34$/m);
   });
 
   it('--dry-run with no device yet: prints the start and the plan on the future serial', () => {
@@ -112,7 +192,10 @@ describe('mk qa:device --emulator', () => {
 
 describe('tuneConfigIni', () => {
   it('sets the managed keys, keeps the rest, adds missing ones', () => {
-    const out = tuneConfigIni('hw.ramSize=2G\r\nhw.lcd.density=420\r\n', EMULATOR_DEFAULTS);
-    assert.equal(out, 'hw.ramSize=4096M\nhw.lcd.density=420\ndisk.dataPartition.size=8G\nhw.keyboard=yes\n');
+    const out = tuneConfigIni('hw.ramSize=2G\r\nhw.lcd.density=420\r\nhw.gpu.mode=auto\r\n', EMULATOR_DEFAULTS);
+    assert.equal(
+      out,
+      'hw.ramSize=4096M\nhw.lcd.density=420\nhw.gpu.mode=host\ndisk.dataPartition.size=8G\nhw.keyboard=yes\nhw.gpu.enabled=yes\n',
+    );
   });
 });

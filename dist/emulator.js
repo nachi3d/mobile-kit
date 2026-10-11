@@ -3,9 +3,11 @@
 // The local Android emulator for device QA:
 //   1. creates the AVD (config "emulator", default mk-pixel8-api34) if
 //      missing, with avdmanager;
-//   2. sets its config.ini: RAM, data partition, hardware keyboard;
-//   3. starts it headed (reuses it if it is already running; --wipe
-//      restarts it with -wipe-data);
+//   2. sets its config.ini: RAM, data partition, hardware keyboard, GPU;
+//   3. starts it with -gpu <emulator.gpu> (default host; one retry with
+//      swiftshader_indirect if that does not boot), headless if configured
+//      (reuses it if it is already running; --wipe restarts it with
+//      -wipe-data);
 //   4. waits for sys.boot_completed=1, unlocks the screen, keeps it on and
 //      turns animations off (stable Maestro runs);
 //   5. prints its adb serial.
@@ -13,9 +15,11 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { listDevices, shell } from './android.js';
+import { dismissForeignAnr, listDevices, shell } from './android.js';
+import { GPU_FALLBACK } from './config.js';
 import { act, formatCommand, run } from './exec.js';
-import { detail, fail, info } from './log.js';
+import { killEmulatorProcesses } from './host.js';
+import { detail, fail, info, warn } from './log.js';
 export const EMULATOR_USAGE = 'Usage: mk emulator [--wipe] [--dry-run]';
 /** Local emulators are "emulator-<port>" on adb; anything else is hardware (USB or Wi-Fi). */
 export const isEmulatorSerial = (serial) => /^emulator-\d+$/.test(serial);
@@ -27,6 +31,9 @@ export function avdHome(env = process.env) {
 }
 const pollMs = () => Number(process.env.MK_POLL_MS) || 2000;
 const bootTimeoutMs = () => Number(process.env.MK_BOOT_TIMEOUT_MS) || 300_000;
+const stopTimeoutMs = () => Number(process.env.MK_STOP_TIMEOUT_MS) || 60_000;
+/** After a boot, the launcher and Play services are still busy for a while. */
+const settleMs = () => (process.env.MK_SETTLE_MS !== undefined ? Number(process.env.MK_SETTLE_MS) : 20_000);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** config.ini lines for the keys mk manages; everything else is kept. */
 export function tuneConfigIni(text, e) {
@@ -34,6 +41,8 @@ export function tuneConfigIni(text, e) {
         'hw.ramSize': `${e.ramMb}M`,
         'disk.dataPartition.size': e.dataPartition,
         'hw.keyboard': 'yes',
+        'hw.gpu.enabled': 'yes',
+        'hw.gpu.mode': e.gpu,
     };
     const seen = new Set();
     const lines = text
@@ -85,58 +94,111 @@ function ensureAvd(p) {
     const after = tuneConfigIni(before, e);
     if (after.replace(/\r/g, '') !== before.replace(/\r/g, '')) {
         if (p.dryRun)
-            detail(`[dry run, not executed] set ${config}: RAM ${e.ramMb}M, data ${e.dataPartition}, hw.keyboard=yes`);
+            detail(`[dry run, not executed] set ${config}: RAM ${e.ramMb}M, data ${e.dataPartition}, hw.keyboard=yes, GPU ${e.gpu}`);
         else {
             fs.writeFileSync(config, after);
-            detail(`config.ini: RAM ${e.ramMb}M, data partition ${e.dataPartition}, hardware keyboard`);
+            detail(`config.ini: RAM ${e.ramMb}M, data partition ${e.dataPartition}, hardware keyboard, GPU ${e.gpu}`);
         }
     }
 }
+/** Emulator command-line arguments. */
+export function emulatorArgs(e, gpu, o) {
+    return [
+        '-avd',
+        e.avd,
+        '-no-boot-anim',
+        '-no-audio',
+        '-gpu',
+        gpu,
+        ...(e.headless ? ['-no-window'] : []),
+        ...(o.cold ? ['-no-snapshot'] : []),
+        ...(o.wipe ? ['-wipe-data'] : []),
+    ];
+}
+/** Stops the AVD's emulator: `adb emu kill`, then its processes if it does not go away. */
+export async function stopEmulator(p, serial) {
+    const avd = p.config.emulator.avd;
+    act(p.dryRun, p.tool.adb, ['-s', serial, 'emu', 'kill']);
+    if (p.dryRun)
+        return;
+    const gone = async (ms) => {
+        const deadline = Date.now() + ms;
+        while (runningSerial(p, avd)) {
+            if (Date.now() > deadline)
+                return false;
+            await sleep(pollMs());
+        }
+        return true;
+    };
+    if (await gone(stopTimeoutMs()))
+        return;
+    warn(`${avd} did not stop with "adb emu kill": killing its processes`);
+    killEmulatorProcesses(p, avd);
+    await gone(stopTimeoutMs());
+}
+/** Launches the emulator and waits until adb sees it booted; null when it failed. */
+async function boot(p, gpu, o) {
+    const e = p.config.emulator;
+    const args = emulatorArgs(e, gpu, o);
+    const how = [o.cold ? 'cold' : '', o.wipe ? 'with wiped data' : '', `GPU ${gpu}`, e.headless ? 'no window' : 'a window opens']
+        .filter(Boolean)
+        .join(', ');
+    info(`Starting ${e.avd} (${how})`);
+    const [cmd, ...pre] = p.tool.emulator;
+    if (p.dryRun || !cmd) {
+        detail(`[dry run, not executed] ${formatCommand([...p.tool.emulator, ...args])}`);
+        return 'emulator-5554';
+    }
+    let exitCode = null;
+    const child = spawn(cmd, [...pre, ...args], { detached: true, stdio: 'ignore', windowsHide: e.headless });
+    child.on('error', () => (exitCode = 127));
+    child.on('exit', (code) => (exitCode = code ?? 1));
+    child.unref();
+    const deadline = Date.now() + bootTimeoutMs();
+    let serial;
+    while (!(serial = runningSerial(p, e.avd))) {
+        if (exitCode !== null && exitCode !== 0) {
+            warn(`The emulator exited with code ${exitCode} before appearing on adb`);
+            return null;
+        }
+        if (Date.now() > deadline) {
+            warn(`${e.avd} did not appear on adb within ${bootTimeoutMs() / 1000} s`);
+            return null;
+        }
+        await sleep(pollMs());
+    }
+    info(`Waiting for ${serial} to boot`);
+    while (shell(p.tool.adb, serial, ['getprop', 'sys.boot_completed']) !== '1') {
+        if (Date.now() > deadline) {
+            warn(`${serial} did not finish booting within ${bootTimeoutMs() / 1000} s`);
+            await stopEmulator(p, serial);
+            return null;
+        }
+        await sleep(pollMs());
+    }
+    return serial;
+}
 /** Starts (or reuses) the emulator and returns its serial once it is ready. */
-export async function ensureEmulator(p, options) {
+export async function ensureEmulator(p, o = {}) {
     const e = p.config.emulator;
     ensureAvd(p);
     let serial = runningSerial(p, e.avd);
-    if (serial && options.wipe) {
-        info(`Stopping ${e.avd} (${serial}) to wipe it`);
-        act(p.dryRun, p.tool.adb, ['-s', serial, 'emu', 'kill']);
-        if (!p.dryRun) {
-            const deadline = Date.now() + 60_000;
-            while (runningSerial(p, e.avd) && Date.now() < deadline)
-                await sleep(pollMs());
-        }
+    if (serial && (o.wipe || o.cold)) {
+        info(`Stopping ${e.avd} (${serial}) to ${o.wipe ? 'wipe it' : 'restart it cold'}`);
+        await stopEmulator(p, serial);
         serial = null;
     }
+    const started = !serial;
     if (serial)
         info(`${e.avd} is already running: ${serial}`);
     else {
-        const args = ['-avd', e.avd, '-no-boot-anim', '-no-audio', ...(options.wipe ? ['-wipe-data'] : [])];
-        info(`Starting ${e.avd}${options.wipe ? ' with wiped data' : ''} (a window opens)`);
-        const [cmd, ...pre] = p.tool.emulator;
-        if (p.dryRun || !cmd)
-            detail(`[dry run, not executed] ${formatCommand([...p.tool.emulator, ...args])}`);
-        else {
-            const child = spawn(cmd, [...pre, ...args], { detached: true, stdio: 'ignore', windowsHide: false });
-            child.on('error', () => undefined);
-            child.unref();
+        serial = await boot(p, e.gpu, o);
+        if (!serial && e.gpu !== GPU_FALLBACK) {
+            warn(`GPU mode "${e.gpu}" did not boot: retrying once with ${GPU_FALLBACK} (software rendering, uses more host memory)`);
+            serial = await boot(p, GPU_FALLBACK, o);
         }
-        if (p.dryRun)
-            return 'emulator-5554';
-        const deadline = Date.now() + bootTimeoutMs();
-        while (!(serial = runningSerial(p, e.avd))) {
-            if (Date.now() > deadline)
-                fail(`${e.avd} did not appear on adb within ${bootTimeoutMs() / 1000} s. Is hardware acceleration on? Run: emulator -accel-check`);
-            await sleep(pollMs());
-        }
-    }
-    if (!p.dryRun) {
-        info(`Waiting for ${serial} to boot`);
-        const deadline = Date.now() + bootTimeoutMs();
-        while (shell(p.tool.adb, serial, ['getprop', 'sys.boot_completed']) !== '1') {
-            if (Date.now() > deadline)
-                fail(`${serial} did not finish booting within ${bootTimeoutMs() / 1000} s`);
-            await sleep(pollMs());
-        }
+        if (!serial)
+            fail(`${e.avd} did not start. Is hardware acceleration on? Run: emulator -accel-check`);
     }
     info('Unlocking the screen and turning animations off');
     const settings = [
@@ -150,8 +212,15 @@ export async function ensureEmulator(p, options) {
     ];
     for (const args of settings)
         act(p.dryRun, p.tool.adb, ['-s', serial, 'shell', ...args]);
+    if (started && !p.dryRun) {
+        detail(`Letting the system settle for ${settleMs() / 1000} s`);
+        await sleep(settleMs());
+        const anr = dismissForeignAnr(false, p.tool.adb, serial, p.config.androidPackage);
+        if (anr)
+            warn(anr);
+    }
     info(`Emulator ready: ${serial}`);
-    return serial;
+    return { serial, started };
 }
 export function parseEmulatorArgs(args) {
     const o = { wipe: false, dryRun: false };

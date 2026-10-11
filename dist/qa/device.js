@@ -1,45 +1,58 @@
-// mk qa:device [--apk <path>] [--skip-build] [--emulator] [--yes] [--no-open] [--dry-run]
+// mk qa:device [--apk <path>] [--skip-build] [--emulator] [--resume <dir>]
+//              [--keep-emulator] [--yes] [--no-open] [--dry-run]
 //
 // Device QA on the one connected phone or emulator (--emulator: the local
 // emulator, started if needed; refused while a physical phone is connected):
-//   1. APK: --apk, else an EAS build of the "qa" profile (--skip-build: no
-//      build and no install, test what is installed);
-//   2. adb install -r, then the installed versionCode must be app.json's;
-//   3. Maestro smoke flows (<maestroDir>/smoke/*.yaml, in name order);
-//   4. screenshot matrix: each screen flow × light/dark × languages × font
-//      scales, captured with adb screencap;
-//   5. the device's night mode, font scale and app language are restored,
+//   1. the screenshot plan is printed first (key screens: every mode ×
+//      language × font scale; the others light/dark, first language, 1.0);
+//   2. APK: --apk, else an EAS build of the "qa" profile (--skip-build or
+//      --resume: no build and no install, test what is installed);
+//   3. adb install -r, then the installed versionCode must be app.json's;
+//   4. Maestro smoke flows (<maestroDir>/smoke/*.yaml, in name order);
+//   5. screenshots in batches of one device setting, captured with adb
+//      screencap. With --emulator, the emulator is cold-restarted before
+//      each batch, and mid-batch when host memory runs low;
+//   6. the device's night mode, font scale and app language are restored,
 //      also on failure or Ctrl+C;
-//   6. .images/captures/<date>-v<version>/report.html, opened.
+//   7. .images/captures/<date>-v<version>/ holds results.json and
+//      report.html, rewritten after every step: a killed run still leaves
+//      a report, and --resume <dir> continues it.
 //
 // --dry-run reads the device and prints every change, build, install and
 // flow instead of running it.
 import fs from 'node:fs';
 import path from 'node:path';
-import { deviceInfo, getAppLocales, getFontScale, getNightMode, installedVersionCode, listDevices, requireOneDevice, screencap, setAppLocalesArgs, setFontScaleArgs, shellAct, } from '../android.js';
+import { deviceInfo, dismissForeignAnr, getAppLocales, getFontScale, getNightMode, installedVersionCode, listDevices, requireOneDevice, screencap, setAppLocalesArgs, setFontScaleArgs, shellAct, } from '../android.js';
 import { isApk } from '../apk.js';
 import { easBuild } from '../eas.js';
-import { ensureEmulator, isEmulatorSerial } from '../emulator.js';
+import { ensureEmulator, isEmulatorSerial, stopEmulator } from '../emulator.js';
 import { act, run } from '../exec.js';
+import { hostMemory, killLeftoverMaestro, memoryPressure } from '../host.js';
 import { detail, fail, info, KitError, warn } from '../log.js';
 import { openProject } from '../project.js';
 import { confirm } from '../prompt.js';
+import { buildPlan, settingLabel, shotKey, shotName } from './plan.js';
 import { renderReport, scaleLabel } from './report.js';
-export const QA_USAGE = 'Usage: mk qa:device [--apk <path>] [--skip-build] [--emulator] [--yes] [--no-open] [--dry-run]';
+export const QA_USAGE = 'Usage: mk qa:device [--apk <path>] [--skip-build] [--emulator] [--resume <dir>] [--keep-emulator] [--yes] [--no-open] [--dry-run]';
 export function parseQaArgs(args) {
-    const o = { skipBuild: false, emulator: false, yes: false, open: true, dryRun: false };
+    const o = { skipBuild: false, emulator: false, keepEmulator: false, yes: false, open: true, dryRun: false };
     for (let i = 0; i < args.length; i++) {
         const a = args[i];
-        if (a === '--apk') {
+        if (a === '--apk' || a === '--resume') {
             const value = args[++i];
             if (!value)
-                fail(`--apk needs a path. ${QA_USAGE}`);
-            o.apk = value;
+                fail(`${a} needs a path. ${QA_USAGE}`);
+            if (a === '--apk')
+                o.apk = value;
+            else
+                o.resume = value;
         }
         else if (a === '--skip-build')
             o.skipBuild = true;
         else if (a === '--emulator')
             o.emulator = true;
+        else if (a === '--keep-emulator')
+            o.keepEmulator = true;
         else if (a === '--yes')
             o.yes = true;
         else if (a === '--no-open')
@@ -57,7 +70,7 @@ const yamlFiles = (dir) => fs.existsSync(dir)
         .filter((f) => /\.ya?ml$/.test(f) && !f.startsWith('_'))
         .sort()
     : [];
-/** Ctrl+C sets this; the run stops at the next step and restores the device. */
+/** Ctrl+C (or a terminal closing) sets this; the run stops at the next step and restores the device. */
 let interrupted = false;
 async function checkpoint() {
     await new Promise((resolve) => setImmediate(resolve));
@@ -83,7 +96,9 @@ function maestro(ctx, flowPath, env, logName) {
         return { flow, ok: true, seconds: 0 };
     }
     const started = Date.now();
-    const r = run(ctx.p.tool.maestro, args, { cwd: ctx.p.root });
+    // Maestro's JVM writes its crash dumps (hs_err_pid*.log, replay_pid*.log)
+    // into its working folder: the capture folder, never the app's root.
+    const r = run(ctx.p.tool.maestro, args, { cwd: ctx.outDir });
     const output = `${r.stdout}\n${r.stderr}`.trim();
     fs.mkdirSync(ctx.logDir, { recursive: true });
     fs.writeFileSync(path.join(ctx.logDir, `${logName}.log`), output);
@@ -95,6 +110,18 @@ function maestro(ctx, flowPath, env, logName) {
         ...(ok ? {} : { error: output.split('\n').slice(-25).join('\n') }),
     };
 }
+/** The run of an earlier invocation, from <dir>/results.json. */
+function loadRun(dir) {
+    const file = path.join(dir, 'results.json');
+    if (!fs.existsSync(file))
+        fail(`--resume: no results.json in ${dir}`);
+    try {
+        return JSON.parse(fs.readFileSync(file, 'utf8'));
+    }
+    catch (e) {
+        fail(`--resume: ${file} is not valid JSON: ${e.message}`);
+    }
+}
 export async function qaDevice(args) {
     const o = parseQaArgs(args);
     const p = openProject({ dryRun: o.dryRun, requireDryRunInFixture: false });
@@ -104,25 +131,47 @@ export async function qaDevice(args) {
     const smoke = yamlFiles(path.join(maestroDir, 'smoke')).map((f) => path.join(maestroDir, 'smoke', f));
     if (smoke.length === 0)
         warn(`No smoke flows in ${config.maestroDir}/smoke/`);
-    const screens = config.screens.map((name) => {
+    const screenFiles = new Map(config.screens.map(({ name }) => {
         const file = path.join(maestroDir, 'screens', `${name}.yaml`);
         if (!fs.existsSync(file))
             fail(`Screen flow missing: ${config.maestroDir}/screens/${name}.yaml (mobile-kit.config.json "screens")`);
-        return { name, file };
-    });
+        return [name, file];
+    }));
     const langFlow = config.languages.method === 'flow' ? path.join(maestroDir, config.languages.flow ?? '') : null;
     if (langFlow && !fs.existsSync(langFlow))
         fail(`Language flow missing: ${config.maestroDir}/${config.languages.flow}`);
+    // --- The plan, first -----------------------------------------------------
+    let plan = buildPlan(config.screens, config.modes, config.languages.codes, config.fontScales);
+    info(`Screenshots: ${plan.summary}`);
+    // --- Earlier run (--resume) ----------------------------------------------
+    let previous = null;
+    let outDir;
+    if (o.resume) {
+        outDir = path.resolve(o.resume);
+        previous = loadRun(outDir);
+        if (previous.androidPackage !== config.androidPackage || previous.version !== app.version || previous.versionCode !== app.versionCode) {
+            fail(`--resume: that run tested ${previous.androidPackage} ${previous.version} (versionCode ${previous.versionCode}); ` +
+                `app.json is ${app.version} (versionCode ${app.versionCode}). Start a new run instead.`);
+        }
+        info(`Resuming ${outDir}`);
+    }
+    else
+        outDir = outputDir(p.root, app.version);
     // --- Device --------------------------------------------------------------
     let serial;
+    let ownsEmulator = false;
+    /** The emulator booted and nothing ran on it yet: no need to restart it. */
+    let freshBoot = false;
     if (o.emulator) {
         const physical = listDevices(p.tool.adb).ready.filter((d) => !isEmulatorSerial(d));
         if (physical.length) {
             fail(`--emulator, but a physical device is connected: ${physical.join(', ')}. ` +
                 'Unplug it (or turn off wireless debugging): QA runs on the emulator only.');
         }
-        const started = await ensureEmulator(p, { wipe: false });
-        serial = p.dryRun && listDevices(p.tool.adb).ready.length === 0 ? started : requireOneDevice(p.tool.adb);
+        const ready = await ensureEmulator(p);
+        ownsEmulator = ready.started;
+        freshBoot = ready.started;
+        serial = p.dryRun && listDevices(p.tool.adb).ready.length === 0 ? ready.serial : requireOneDevice(p.tool.adb);
     }
     else
         serial = requireOneDevice(p.tool.adb);
@@ -137,8 +186,8 @@ export async function qaDevice(args) {
             fail(`Not an APK: ${o.apk}`);
         apkLabel = path.basename(apk);
     }
-    else if (o.skipBuild) {
-        apkLabel = 'already installed (--skip-build)';
+    else if (o.skipBuild || previous) {
+        apkLabel = previous?.apk ?? 'already installed (--skip-build)';
     }
     else {
         apk = path.join(p.root, 'dist', `${config.apkName}-${app.version}-qa.apk`);
@@ -146,8 +195,11 @@ export async function qaDevice(args) {
         if (!easBuild(p, config.easProfiles.qa, apk))
             apk = p.dryRun ? apk : null;
     }
-    // --- Smoke flows that wipe the app's data ask first ----------------------
-    const wipes = smoke.filter((f) => /\bclearState\b/.test(fs.readFileSync(f, 'utf8')));
+    // --- Smoke flows still to run; those that wipe the app's data ask first --
+    const smokeDone = new Set((previous?.smoke ?? []).map((f) => f.flow));
+    const flowName = (file) => path.relative(maestroDir, file).replace(/\\/g, '/');
+    const smokeToRun = smoke.filter((f) => !smokeDone.has(flowName(f)));
+    const wipes = smokeToRun.filter((f) => /\bclearState\b/.test(fs.readFileSync(f, 'utf8')));
     if (wipes.length) {
         const names = wipes.map((f) => path.basename(f)).join(', ');
         const question = `${names} CLEAR ${config.appName}'s data on ${device.model} (${serial}). Continue?`;
@@ -156,6 +208,10 @@ export async function qaDevice(args) {
         else if (!o.yes && !(await confirm(question)))
             fail('Stopped: nothing installed or changed.');
     }
+    // --- Maestro runs a killed mk left behind on this device -----------------
+    const leftovers = killLeftoverMaestro(p, serial);
+    if (leftovers)
+        warn(`Stopped ${leftovers} Maestro process(es) left on ${serial} by an earlier run`);
     // --- Install and versionCode ---------------------------------------------
     if (apk) {
         info(`Installing ${path.basename(apk)} on ${serial} (adb install -r keeps the data)`);
@@ -172,9 +228,29 @@ export async function qaDevice(args) {
     }
     else
         info(`Installed versionCode ${installed} = app.json`);
-    // --- Runs ----------------------------------------------------------------
-    const outDir = outputDir(p.root, app.version);
-    const ctx = { p, serial, device, maestroDir, logDir: path.join(outDir, 'logs') };
+    // --- Languages -----------------------------------------------------------
+    const notes = [];
+    let languages = config.languages.codes;
+    const method = config.languages.method;
+    if (method === 'app-locale' && device.sdk < 33) {
+        const note = `Per-app language needs Android 13+ (this device: API ${device.sdk}): screenshots in the current language only.`;
+        warn(note);
+        notes.push(note);
+        languages = ['current'];
+        plan = buildPlan(config.screens, config.modes, languages, config.fontScales);
+        info(`Screenshots: ${plan.summary}`);
+    }
+    // --- The run, written after every step -----------------------------------
+    const ctx = { p, serial, device, maestroDir, outDir, logDir: path.join(outDir, 'logs') };
+    const done = new Map((previous?.shots ?? []).filter((s) => s.file).map((s) => [shotKey(s.screen, s), s]));
+    const shots = plan.batches.flatMap((b) => b.screens.map((screen) => done.get(shotKey(screen, b)) ?? { screen, mode: b.mode, lang: b.lang, scale: b.scale }));
+    const saved = previous?.saved ?? {
+        night: getNightMode(p.tool.adb, serial),
+        fontScale: getFontScale(p.tool.adb, serial),
+        appLocales: method === 'app-locale' && languages[0] !== 'current' ? getAppLocales(p.tool.adb, serial, config.androidPackage) : null,
+    };
+    info(`${previous?.saved ? 'Device settings to restore (from the first run)' : 'Saved device settings'}: night mode ${saved.night}, font_scale ${saved.fontScale}` +
+        (saved.appLocales !== null ? `, app language ${saved.appLocales || 'system'}` : ''));
     const run_ = {
         appName: config.appName,
         androidPackage: config.androidPackage,
@@ -183,36 +259,41 @@ export async function qaDevice(args) {
         installedVersionCode: installed,
         apk: apkLabel,
         device,
-        startedAt: new Date().toISOString(),
+        startedAt: previous?.startedAt ?? new Date().toISOString(),
         finishedAt: '',
-        smoke: [],
-        shots: [],
-        notes: [],
+        outDir,
+        plan: plan.summary,
+        saved,
+        smoke: [...(previous?.smoke ?? [])],
+        shots,
+        notes: [...(previous?.notes ?? []), ...(previous ? [`Resumed ${new Date().toISOString()}`] : []), ...notes],
     };
-    // Language switching.
-    let languages = config.languages.codes;
-    const method = config.languages.method;
-    if (method === 'app-locale' && device.sdk < 33) {
-        const note = `Per-app language needs Android 13+ (this device: API ${device.sdk}): screenshots in the current language only.`;
-        warn(note);
-        run_.notes.push(note);
-        languages = ['current'];
-    }
-    const saved = {
-        night: getNightMode(p.tool.adb, serial),
-        fontScale: getFontScale(p.tool.adb, serial),
-        appLocales: method === 'app-locale' && languages[0] !== 'current' ? getAppLocales(p.tool.adb, serial, config.androidPackage) : null,
+    const persist = () => {
+        if (p.dryRun)
+            return;
+        fs.mkdirSync(outDir, { recursive: true });
+        fs.writeFileSync(path.join(outDir, 'results.json'), `${JSON.stringify(run_, null, 2)}\n`);
+        fs.writeFileSync(path.join(outDir, 'report.html'), renderReport(run_));
     };
-    info(`Saved device settings: night mode ${saved.night}, font_scale ${saved.fontScale}` +
-        (saved.appLocales !== null ? `, app language ${saved.appLocales || 'system'}` : ''));
+    const note = (text) => {
+        warn(text);
+        run_.notes.push(text);
+        persist();
+    };
+    persist();
+    const anrCheck = () => {
+        const n = dismissForeignAnr(p.dryRun, p.tool.adb, ctx.serial, config.androidPackage);
+        if (n)
+            note(n);
+    };
     const setLanguage = (lang) => {
         if (lang === 'current')
             return;
         if (method === 'app-locale')
-            shellAct(p.dryRun, p.tool.adb, serial, setAppLocalesArgs(config.androidPackage, lang));
+            shellAct(p.dryRun, p.tool.adb, ctx.serial, setAppLocalesArgs(config.androidPackage, lang));
         else if (method === 'deep-link') {
             const url = (config.languages.deepLink ?? '').replace('{lang}', lang);
-            shellAct(p.dryRun, p.tool.adb, serial, ['am', 'start', '-W', '-a', 'android.intent.action.VIEW', '-d', url, config.androidPackage]);
+            shellAct(p.dryRun, p.tool.adb, ctx.serial, ['am', 'start', '-W', '-a', 'android.intent.action.VIEW', '-d', url, config.androidPackage]);
         }
         else if (langFlow) {
             const r = maestro(ctx, langFlow, { APP_ID: config.androidPackage, LANG: lang }, `language-${lang}`);
@@ -220,61 +301,101 @@ export async function qaDevice(args) {
                 throw new KitError(`Language flow failed for ${lang}: ${r.error ?? ''}`);
         }
     };
-    const onSigint = () => {
-        interrupted = true;
-        warn('Ctrl+C: stopping after this step, then restoring the device settings');
+    const applySetting = (s) => {
+        shellAct(p.dryRun, p.tool.adb, ctx.serial, ['cmd', 'uimode', 'night', s.mode === 'dark' ? 'yes' : 'no']);
+        shellAct(p.dryRun, p.tool.adb, ctx.serial, setFontScaleArgs(s.scale.toFixed(2).replace(/0$/, '')));
+        setLanguage(s.lang);
     };
-    process.on('SIGINT', onSigint);
+    /** Emulator only: a cold boot frees the host memory the emulator kept. */
+    const restartEmulator = async (why) => {
+        info(`Restarting the emulator cold (${why})`);
+        const ready = await ensureEmulator(p, { cold: true });
+        ctx.serial = ready.serial;
+        ownsEmulator = true;
+        freshBoot = true;
+    };
+    const onSignal = () => {
+        interrupted = true;
+        warn('Stopping after this step, then restoring the device settings');
+    };
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+    for (const s of signals)
+        process.on(s, onSignal);
     let stopError = null;
     try {
         // Smoke.
-        if (smoke.length)
-            info(`Maestro smoke flows (${smoke.length})`);
-        for (const file of smoke) {
+        if (smokeToRun.length)
+            info(`Maestro smoke flows (${smokeToRun.length}${smokeDone.size ? `, ${smokeDone.size} done earlier` : ''})`);
+        for (const file of smokeToRun) {
             await checkpoint();
+            anrCheck();
             detail(`${path.basename(file)} …`);
             const r = maestro(ctx, file, { APP_ID: config.androidPackage }, `smoke-${path.basename(file, path.extname(file))}`);
+            freshBoot = false;
             run_.smoke.push(r);
+            persist();
             if (!p.dryRun)
                 detail(`${r.ok ? 'PASS' : 'FAIL'} ${r.flow} (${r.seconds.toFixed(1)} s)`);
         }
-        // Matrix.
-        const total = screens.length * config.modes.length * languages.length * config.fontScales.length;
-        info(`Screenshots: ${screens.length} screens × ${config.modes.length} modes × ${languages.length} languages × ${config.fontScales.length} font scales = ${total}`);
+        // Screenshots, one batch per device setting.
         if (!p.dryRun)
             fs.mkdirSync(outDir, { recursive: true });
-        for (const mode of config.modes) {
+        const pending = (b) => b.screens.filter((screen) => !done.has(shotKey(screen, b)));
+        const todo = plan.batches.filter((b) => pending(b).length);
+        info(`Screenshots: ${todo.length} batch(es) to run${done.size ? `, ${done.size} screenshot(s) kept from the earlier run` : ''}`);
+        for (const [i, batch] of todo.entries()) {
             await checkpoint();
-            shellAct(p.dryRun, p.tool.adb, serial, ['cmd', 'uimode', 'night', mode === 'dark' ? 'yes' : 'no']);
-            for (const scale of config.fontScales) {
+            info(`Batch ${i + 1}/${todo.length}: ${settingLabel(batch)}`);
+            if (o.emulator && !freshBoot)
+                await restartEmulator('one batch per boot');
+            applySetting(batch);
+            const names = pending(batch);
+            for (const [j, screen] of names.entries()) {
                 await checkpoint();
-                shellAct(p.dryRun, p.tool.adb, serial, setFontScaleArgs(scale.toFixed(2).replace(/0$/, '')));
-                for (const lang of languages) {
-                    await checkpoint();
-                    setLanguage(lang);
-                    for (const screen of screens) {
-                        await checkpoint();
-                        const name = `${screen.name}_${mode}_${lang}_${scale.toFixed(1)}x`;
-                        const shot = { screen: screen.name, mode, lang, scale };
-                        const r = maestro(ctx, screen.file, { APP_ID: config.androidPackage }, `screen-${name}`);
-                        if (p.dryRun) {
-                            detail(`[dry run, not executed] adb -s ${serial} exec-out screencap -p > ${name}.png`);
-                        }
-                        else if (!r.ok) {
-                            shot.error = `Flow failed: ${r.error?.split('\n').slice(-3).join(' ') ?? ''}`;
-                        }
-                        else {
-                            const png = screencap(p.tool.adb, serial);
-                            if (png) {
-                                fs.writeFileSync(path.join(outDir, `${name}.png`), png);
-                                shot.file = `${name}.png`;
-                            }
-                            else
-                                shot.error = 'adb screencap returned no PNG';
-                        }
-                        run_.shots.push(shot);
-                        if (!p.dryRun)
-                            detail(`${shot.file ? 'OK  ' : 'MISS'} ${screen.name} · ${mode} · ${lang} · ${scaleLabel(scale)}`);
+                anrCheck();
+                const name = shotName(screen, batch);
+                const shot = shots.find((s) => shotKey(s.screen, s) === shotKey(screen, batch));
+                if (!shot)
+                    throw new KitError(`Internal: ${name} is not in the plan`);
+                delete shot.error;
+                const flow = screenFiles.get(screen) ?? '';
+                let r = maestro(ctx, flow, { APP_ID: config.androidPackage }, `screen-${name}`);
+                freshBoot = false;
+                // A screen flow only opens a screen: run it again if another app's
+                // "isn't responding" dialog was covering it.
+                if (!r.ok && !p.dryRun) {
+                    const n = dismissForeignAnr(false, p.tool.adb, ctx.serial, config.androidPackage);
+                    if (n?.endsWith('tapped Wait')) {
+                        note(`${n} during ${name}: ran it again`);
+                        r = maestro(ctx, flow, { APP_ID: config.androidPackage }, `screen-${name}-retry`);
+                    }
+                }
+                if (p.dryRun) {
+                    detail(`[dry run, not executed] adb -s ${ctx.serial} exec-out screencap -p > ${name}.png`);
+                }
+                else if (!r.ok) {
+                    shot.error = `Flow failed: ${r.error?.split('\n').slice(-3).join(' ') ?? ''}`;
+                }
+                else {
+                    const png = screencap(p.tool.adb, ctx.serial);
+                    if (png) {
+                        fs.writeFileSync(path.join(outDir, `${name}.png`), png);
+                        shot.file = `${name}.png`;
+                    }
+                    else
+                        shot.error = 'adb screencap returned no PNG';
+                }
+                persist();
+                if (!p.dryRun)
+                    detail(`${shot.file ? 'OK  ' : 'MISS'} ${screen} · ${batch.mode} · ${batch.lang} · ${scaleLabel(batch.scale)}`);
+                // Watchdog: the capture is done; restart before the next one if memory is short.
+                if (o.emulator && !p.dryRun && j < names.length - 1) {
+                    const m = hostMemory(p);
+                    const why = m && memoryPressure(m, config.emulator);
+                    if (why) {
+                        note(`Memory: ${why}: restarted the emulator before ${names[j + 1]} (${settingLabel(batch)})`);
+                        await restartEmulator(why);
+                        applySetting(batch);
                     }
                 }
             }
@@ -284,8 +405,20 @@ export async function qaDevice(args) {
         stopError = e;
     }
     finally {
-        process.off('SIGINT', onSigint);
+        for (const s of signals)
+            process.off(s, onSignal);
         restore(ctx, saved, run_);
+        run_.finishedAt = new Date().toISOString();
+        if (stopError)
+            run_.notes.push(`Stopped early: ${stopError.message}`);
+        persist();
+        const left = killLeftoverMaestro(p, ctx.serial);
+        if (left)
+            warn(`Stopped ${left} Maestro process(es) still running on ${ctx.serial}`);
+        if (o.emulator && ownsEmulator && !o.keepEmulator) {
+            info('Stopping the emulator (mk started it; --keep-emulator leaves it running)');
+            await stopEmulator(p, ctx.serial).catch((e) => warn(`Could not stop the emulator: ${e.message}`));
+        }
     }
     if (p.dryRun) {
         if (stopError)
@@ -293,13 +426,7 @@ export async function qaDevice(args) {
         info('Dry run: no report written');
         return;
     }
-    run_.finishedAt = new Date().toISOString();
-    if (stopError)
-        run_.notes.push(`Stopped early: ${stopError.message}`);
-    fs.mkdirSync(outDir, { recursive: true });
-    fs.writeFileSync(path.join(outDir, 'results.json'), `${JSON.stringify(run_, null, 2)}\n`);
     const report = path.join(outDir, 'report.html');
-    fs.writeFileSync(report, renderReport(run_));
     info(`Report: ${report}`);
     if (o.open)
         run(p.tool.open, [report]);
@@ -317,9 +444,9 @@ function restore(ctx, saved, r) {
     info('Restoring the device settings');
     const attempt = (what, fn) => {
         try {
-            const r = fn();
-            if (r && r.status !== 0)
-                throw new Error(r.stderr.trim() || `exit ${r.status}`);
+            const res = fn();
+            if (res && res.status !== 0)
+                throw new Error(res.stderr.trim() || `exit ${res.status}`);
         }
         catch (e) {
             const note = `Could not restore ${what}: ${e.message}. Set it back by hand.`;

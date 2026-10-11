@@ -11,6 +11,7 @@
 //   MK_OPEN       default the OS "open this file" command
 //   MK_EMULATOR   default emulator of the Android SDK
 //   MK_AVDMANAGER default avdmanager of the SDK's cmdline-tools/latest
+//   MK_PROCS      default `node dist/procs.js` (host memory, leftover processes)
 //
 // A value is split on whitespace, or is a JSON array of strings when it
 // starts with "[" (for paths with spaces). An empty value means "missing"
@@ -18,10 +19,11 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { detail } from './log.js';
 
-export const TOOLS = ['eas', 'wrangler', 'curl', 'adb', 'maestro', 'aapt', 'apksigner', 'open', 'emulator', 'avdmanager'] as const;
+export const TOOLS = ['eas', 'wrangler', 'curl', 'adb', 'maestro', 'aapt', 'apksigner', 'open', 'emulator', 'avdmanager', 'procs'] as const;
 export type ToolName = (typeof TOOLS)[number];
 
 export const toolEnv = (tool: ToolName) => `MK_${tool.toUpperCase()}`;
@@ -92,6 +94,8 @@ function defaultCommand(tool: ToolName): string[] {
       const f = findSdkTool('cmdline-tools', 'latest', 'bin', 'avdmanager');
       return f ? [f] : ['avdmanager'];
     }
+    case 'procs':
+      return [process.execPath, fileURLToPath(new URL('./procs.js', import.meta.url))];
     case 'open':
       if (process.platform === 'win32') return ['explorer.exe'];
       return [process.platform === 'darwin' ? 'open' : 'xdg-open'];

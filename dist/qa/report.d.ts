@@ -11,9 +11,15 @@ export interface Shot {
     mode: string;
     lang: string;
     scale: number;
-    /** Relative to the report; absent when the capture failed. */
+    /** Relative to the report; absent when the capture failed or did not run yet. */
     file?: string;
     error?: string;
+}
+/** Device settings read before the matrix and put back after it. */
+export interface SavedSettings {
+    night: string;
+    fontScale: string;
+    appLocales: string | null;
 }
 export interface QaRun {
     appName: string;
@@ -24,8 +30,16 @@ export interface QaRun {
     apk: string;
     device: DeviceInfo;
     startedAt: string;
+    /** Empty while the run is going on, or when it was killed. */
     finishedAt: string;
+    /** The capture folder (absolute), for `--resume`. */
+    outDir: string;
+    /** e.g. "3 key screens × 2 modes × … = 32, in 8 batches" */
+    plan: string;
+    /** The device settings before the first run, restored at the end (kept by --resume). */
+    saved: SavedSettings | null;
     smoke: FlowResult[];
+    /** Every planned screenshot; those not run yet have neither file nor error. */
     shots: Shot[];
     notes: string[];
 }
