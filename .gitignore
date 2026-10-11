@@ -1,0 +1,7 @@
+node_modules/
+# dist/ IS committed: apps install mobile-kit by git tag, without a build step.
+*.tsbuildinfo
+.env
+.env.*
+*.apk
+.images/
