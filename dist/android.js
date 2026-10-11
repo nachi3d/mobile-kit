@@ -84,3 +84,38 @@ export function screencap(adb, serial) {
     const bytes = r.stdoutBytes;
     return bytes.subarray(0, 8).equals(PNG_SIGNATURE) ? bytes : null;
 }
+// --- "<app> isn't responding" dialogs ---------------------------------------
+/** Package of the ANR dialog that has the focus, or null. */
+export function focusedAnr(adb, serial) {
+    const out = shell(adb, serial, ['dumpsys', 'window', 'windows']);
+    return /mCurrentFocus=.*Application Not Responding: ([\w.]+)/.exec(out)?.[1] ?? null;
+}
+/** Centre of the dialog's Wait button (android:id/aerr_wait) in a uiautomator dump. */
+export function waitButtonCentre(xml) {
+    const m = /resource-id="android:id\/aerr_wait"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/.exec(xml);
+    if (!m)
+        return null;
+    const [x1, y1, x2, y2] = m.slice(1, 5).map(Number);
+    return [Math.round((x1 + x2) / 2), Math.round((y1 + y2) / 2)];
+}
+/**
+ * Another app's ANR dialog (e.g. "Pixel Launcher isn't responding" after a
+ * cold boot) covers the app and fails every flow: tap its Wait button. An
+ * ANR of the app under test is left alone; it is a finding. Returns a note
+ * for the report, or null when there was nothing to do.
+ */
+export function dismissForeignAnr(dryRun, adb, serial, appPackage) {
+    if (dryRun)
+        return null;
+    const pkg = focusedAnr(adb, serial);
+    if (!pkg)
+        return null;
+    if (pkg === appPackage)
+        return `${appPackage} itself was not responding (ANR dialog left on screen)`;
+    const xml = run(adb, ['-s', serial, 'exec-out', 'uiautomator', 'dump', '/dev/tty']).stdout;
+    const centre = waitButtonCentre(xml);
+    if (!centre)
+        return `${pkg} was not responding; its dialog had no Wait button to tap`;
+    shell(adb, serial, ['input', 'tap', String(centre[0]), String(centre[1])]);
+    return `${pkg} was not responding: tapped Wait`;
+}

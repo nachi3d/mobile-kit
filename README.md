@@ -5,7 +5,7 @@ device QA with screenshots, and APK releases to Cloudflare R2. Each app
 keeps only a `mobile-kit.config.json` and its Maestro flows.
 
 ```
-mk qa:device [--apk <path>] [--skip-build] [--emulator] [--yes] [--no-open] [--dry-run]
+mk qa:device [--apk <path>] [--skip-build] [--emulator] [--resume <dir>] [--keep-emulator] [--yes] [--no-open] [--dry-run]
 mk emulator [--wipe] [--dry-run]
 mk release:build <version> [--dry-run]
 mk release:promote <version> [--dry-run]
@@ -27,36 +27,75 @@ release commands refuse to run on a test fixture without `--dry-run`.
 
 On the one connected phone or emulator:
 
-1. **APK.** `--apk <path>`, or an EAS build of the `qa` profile (default
+1. **Plan.** Prints the number of screenshots first. Screens marked
+   `"key": true` get the full matrix: every mode × language × font scale.
+   The others get light and dark only, in the first language, at scale
+   1.0. Example: `3 key screens × 2 modes × 2 languages × 2 font scales +
+   4 screens × 2 modes = 32, in 8 batches`.
+2. **APK.** `--apk <path>`, or an EAS build of the `qa` profile (default
    `preview`: `eas build -p android --profile preview --non-interactive
    --wait --json`), downloaded to `dist/<apkName>-<version>-qa.apk`.
    `--skip-build` builds and installs nothing: it tests what is installed.
-2. **Device.** Exactly one device on `adb devices`, otherwise it stops with
+3. **Device.** Exactly one device on `adb devices`, otherwise it stops with
    help. With `--emulator`:
    - it refuses while a physical phone is connected (USB or Wi-Fi);
    - otherwise it starts the local emulator like `mk emulator` (or reuses
      it).
-3. **Data wipe check.** If a smoke flow uses `clearState` (it wipes the
+4. **Data wipe check.** If a smoke flow uses `clearState` (it wipes the
    app's data), it asks first. `--yes` answers yes. Use an emulator or a
    test phone, not a phone with real data.
-4. **Install.** Runs `adb install -r`, which keeps the data. The installed
+5. **Leftovers.** Maestro processes that a killed run left on the device
+   are stopped.
+6. **Install.** Runs `adb install -r`, which keeps the data. The installed
    versionCode (`dumpsys package`) must equal `app.json`, otherwise it
    stops before testing.
-5. **Smoke.** Runs every `<maestroDir>/smoke/*.yaml` in name order, one
+7. **Smoke.** Runs every `<maestroDir>/smoke/*.yaml` in name order, one
    after the other. Files starting with `_` are subflows and are skipped.
-6. **Screenshots.** Runs each `screens` flow × light/dark (`cmd uimode
-   night`) × each language × each font scale (`settings put system
-   font_scale`, default 1.0 and 1.3). Each one is captured with `adb
-   exec-out screencap`.
-7. **Restore.** Night mode, font scale and app language go back to what
-   they were, also after a failure or Ctrl+C.
-8. **Report.** Writes `.images/captures/<YYYY-MM-DD>-v<version>/` with the
-   PNGs, `logs/`, `results.json` and `report.html`, then opens it (unless
-   `--no-open`). The page has a gallery grouped by screen with
-   mode/language/scale labels and filters, the Maestro results, and the
-   device model, Android version and versionCode.
+8. **Screenshots, in batches.** One batch per device setting: night mode
+   (`cmd uimode night`), font scale (`settings put system font_scale`) and
+   language. Each screen is captured with `adb exec-out screencap`. With
+   `--emulator`:
+   - The emulator is **cold-restarted before each batch**
+     (`-no-snapshot`). A booted emulator keeps host memory it never gives
+     back.
+   - **Watchdog.** After each capture, if free host RAM is below
+     `emulator.minFreeMb` (2048), or the emulator process uses more than
+     `emulator.maxEmulatorMb` (6144), it restarts the emulator, puts the
+     batch's settings back and goes on with the next screen.
+9. **"Isn't responding" dialogs.** Before each flow, mk looks for another
+   app's ANR dialog (e.g. "Pixel Launcher isn't responding" after a cold
+   boot) and taps its **Wait** button. A screen flow that failed because
+   such a dialog appeared runs once more. An ANR of the app under test is
+   left alone and reported: it is a finding.
+10. **Restore.** Night mode, font scale and app language go back to what
+    they were before the first run, also after a failure or Ctrl+C.
+11. **Report.** `.images/captures/<YYYY-MM-DD>-v<version>/` holds the PNGs,
+    `logs/`, `results.json` and `report.html`.
+    - Both files are **rewritten after every flow and capture**, so a run
+      that is killed still leaves a report. Screenshots not taken show as
+      "Not captured", with the command to resume.
+    - The report opens at the end (unless `--no-open`).
+    - The page has a gallery grouped by screen with mode/language/scale
+      labels and filters, the Maestro results, the notes (restarts,
+      dialogs), and the device model, Android version and versionCode.
+12. **Clean exit.** Maestro processes still running are stopped. If mk
+    started or restarted the emulator, it stops it (`--keep-emulator`
+    leaves it running). Maestro runs in the capture folder, so JVM crash
+    dumps (`hs_err_pid*.log`) land there, never in the app.
 
 It exits non-zero if any smoke flow failed or any screenshot is missing.
+
+**`--resume <capture folder>`** continues a run that stopped (killed,
+Ctrl+C, out of memory):
+- It builds and installs nothing.
+- It skips the smoke flows the first run recorded, keeps its screenshots
+  and takes only the missing ones.
+- It restores the device settings the **first** run saved, even if the
+  killed run left dark mode or 1.3× on.
+- It refuses a folder of another version or versionCode.
+
+Example: `npm run qa:device -- --emulator --yes --resume
+.images/captures/2026-10-11-v0.3.0`.
 
 **Languages** (`languages.method`):
 
@@ -77,18 +116,40 @@ The local emulator for QA, idempotent:
 1. Creates the AVD if it is missing (`avdmanager create avd`). The
    defaults are `mk-pixel8-api34`, device `pixel_8`, image
    `system-images;android-34;google_apis_playstore;x86_64`.
-2. Sets its `config.ini` on every run: `hw.ramSize=4096M`,
-   `disk.dataPartition.size=8G`, `hw.keyboard=yes`.
-3. Starts it with a window, or reuses it if it is already running.
-   `--wipe` restarts it with `-wipe-data`.
+2. Sets its `config.ini` on every run: `hw.ramSize`, `disk.dataPartition.size`,
+   `hw.keyboard=yes`, `hw.gpu.enabled=yes`, `hw.gpu.mode`.
+3. Starts it with `-gpu host` (the PC's graphics card), or reuses it if it
+   is already running. `--wipe` restarts it with `-wipe-data`.
+   - If the GPU mode does not boot (the emulator exits, or is not up
+     within 5 minutes), mk retries **once** with `swiftshader_indirect`.
+     That is software rendering, which uses much more host memory. The
+     config keeps `host`.
+   - With `"headless": true` it starts with `-no-window`.
 4. Waits for `sys.boot_completed=1`, unlocks the screen, keeps it on and
    sets the window, transition and animator scales to 0 so Maestro runs
-   are stable.
+   are stable. After a boot it waits 20 s for the system to settle, then
+   taps Wait on any "isn't responding" dialog.
 5. Prints its adb serial (`emulator-5554`).
 
-A cold boot takes about 2–3 minutes; a reused emulator about 20 s. Override
-the defaults with the config's `emulator` key:
-`{ "avd", "device", "image", "ramMb", "dataPartition" }`.
+A cold boot takes about 1–3 minutes; a reused emulator about 20 s.
+
+Override the defaults with the config's `emulator` key (every key is
+optional):
+
+| Key | Default | What |
+|---|---|---|
+| `avd`, `device`, `image` | `mk-pixel8-api34`, `pixel_8`, API 34 Play x86_64 | the AVD |
+| `ramMb` | 4096 | guest RAM. On a 16 GB PC, 3072 leaves room for the rest. |
+| `dataPartition` | `"8G"` | data partition |
+| `gpu` | `"host"` | `host`, `swiftshader_indirect`, `angle_indirect`, `guest`, `auto` |
+| `headless` | `false` | `-no-window` |
+| `minFreeMb` | 2048 | qa:device restarts the emulator below this much free host RAM |
+| `maxEmulatorMb` | 6144 | …or when the emulator process uses more than this |
+
+**Why these defaults.** On a 16 GB Windows PC, a full screenshot run with
+software rendering grew the emulator process past 14 GB, and Maestro's JVM
+then crashed for lack of memory. With `-gpu host` it grew far more slowly.
+Batches with a cold restart, plus the watchdog, keep it bounded.
 
 ## `mk release:build <version>` / `mk release:promote <version>`
 
@@ -283,7 +344,7 @@ Configuration → Purge Cache → Custom Purge → both URLs.
 ## Adopting it in an app
 
 1. **Install.**
-   `npm install --save-dev github:nachi3d/mobile-kit#v0.1.0`, which pins the
+   `npm install --save-dev github:nachi3d/mobile-kit#v0.2.0`, which pins the
    tag. `dist/` is committed, so there is no build step.
 2. **`mobile-kit.config.json`** at the app root:
 
@@ -297,15 +358,19 @@ Configuration → Purge Cache → Custom Purge → both URLs.
      "downloadsHost": "downloads.nachi3dlabs.com",
      "signingSha1": "A9:72:57:A7:C0:D5:58:E2:96:03:18:FA:D7:AB:87:69:A3:52:0B:DF",
      "maestroDir": ".maestro",
-     "screens": ["shelf", "copy-detail", "settings"]
+     "screens": [{ "name": "shelf", "key": true }, "copy-detail", "settings"]
    }
    ```
+
+   A `screens` entry is a flow name, or `{ "name", "key": true }` for a
+   key screen (full matrix, see `mk qa:device` → Plan).
 
    Optional keys, with their defaults:
    - `"easProfiles": {"qa": "preview", "release": "production"}`;
    - `"languages": {"codes": ["en", "fr"], "method": "app-locale"}`;
    - `"modes": ["light", "dark"]`;
-   - `"fontScales": [1.0, 1.3]`.
+   - `"fontScales": [1.0, 1.3]`;
+   - `"emulator": {…}` (see `mk emulator`).
 
    `androidPackage` must match `app.json`.
 
@@ -371,8 +436,13 @@ npm run typecheck
 ```
 
 - Fakes are injected through `MK_EAS`, `MK_WRANGLER`, `MK_CURL`, `MK_ADB`,
-  `MK_MAESTRO`, `MK_AAPT`, `MK_APKSIGNER` and `MK_OPEN`: a command line, or
-  a JSON array for paths with spaces.
+  `MK_MAESTRO`, `MK_AAPT`, `MK_APKSIGNER`, `MK_OPEN`, `MK_EMULATOR`,
+  `MK_AVDMANAGER` and `MK_PROCS`: a command line, or a JSON array for paths
+  with spaces.
+  - `MK_PROCS` (default `node dist/procs.js`) reads host memory and stops
+    leftover Maestro and emulator processes.
+- Timings for tests: `MK_POLL_MS`, `MK_BOOT_TIMEOUT_MS`,
+  `MK_STOP_TIMEOUT_MS`, `MK_SETTLE_MS`.
 - `MK_ROOT` points at a test fixture. It requires every command injected,
   and `--dry-run` for release commands.
 - Never use PATH stubs.

@@ -1,4 +1,4 @@
-export declare const TOOLS: readonly ["eas", "wrangler", "curl", "adb", "maestro", "aapt", "apksigner", "open", "emulator", "avdmanager"];
+export declare const TOOLS: readonly ["eas", "wrangler", "curl", "adb", "maestro", "aapt", "apksigner", "open", "emulator", "avdmanager", "procs"];
 export type ToolName = (typeof TOOLS)[number];
 export declare const toolEnv: (tool: ToolName) => string;
 /** Android SDK folders that exist, in lookup order. */

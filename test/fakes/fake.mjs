@@ -24,6 +24,10 @@ function state() {
     locales: env.FAKE_LOCALES ?? '',
     versionCode: env.FAKE_INSTALLED_VC ?? '15',
     emulator: env.FAKE_EMULATOR_RUNNING ?? '',
+    // Package whose "isn't responding" dialog has the focus ('' = none).
+    anr: env.FAKE_ANR ?? '',
+    memCalls: 0,
+    boots: 0,
   };
   if (!env.FAKE_STATE) return initial;
   if (!fs.existsSync(env.FAKE_STATE)) fs.writeFileSync(env.FAKE_STATE, JSON.stringify(initial));
@@ -39,9 +43,29 @@ switch (tool) {
   case 'open':
     break;
   case 'emulator': {
+    // FAKE_FAIL=emulator:<gpu>: that GPU mode does not boot (exit 1).
+    if (failIf(`emulator:${args[args.indexOf('-gpu') + 1]}`)) process.exit(1);
     const s = state();
     s.emulator = args[args.indexOf('-avd') + 1];
+    s.boots += 1;
     save(s);
+    break;
+  }
+  case 'procs': {
+    if (args[0] === 'mem') {
+      // FAKE_MEM_SEQ="free:emu,free:emu,…": one pair per call, the last one repeats.
+      const s = state();
+      const seq = (env.FAKE_MEM_SEQ ?? '8000:2000').split(',');
+      const [free, emu] = seq[Math.min(s.memCalls, seq.length - 1)].split(':').map(Number);
+      s.memCalls += 1;
+      save(s);
+      out(JSON.stringify({ freeMb: free, emulatorMb: emu }));
+    } else if (args[0] === 'kill-emulator') {
+      const s = state();
+      s.emulator = '';
+      save(s);
+      out('2\n');
+    } else out(`${env.FAKE_KILLED ?? '0'}\n`);
     break;
   }
   case 'avdmanager': {
@@ -83,6 +107,21 @@ switch (tool) {
   case 'maestro': {
     const flow = args[args.indexOf('test') + 1] ?? '';
     const name = flow.replace(/\\/g, '/').split('/').pop().replace(/\.ya?ml$/, '');
+    // FAKE_MAESTRO_MS: each flow takes that long (a test kills mk meanwhile).
+    if (env.FAKE_MAESTRO_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(env.FAKE_MAESTRO_MS));
+    // FAKE_JVM_CRASH: the JVM leaves a crash dump in its working folder.
+    if (env.FAKE_JVM_CRASH) fs.writeFileSync('hs_err_pid4242.log', '# A fatal error has been detected\n');
+    const s = state();
+    // FAKE_ANR_DURING=<flow>: the launcher stops responding during that flow (once).
+    if (env.FAKE_ANR_DURING === name && !s.anrShown) {
+      s.anr = 'com.google.android.apps.nexuslauncher';
+      s.anrShown = true;
+      save(s);
+    }
+    if (s.anr) {
+      out(`Running ${name}\nAssertion is false: an ANR dialog covers the app\n`);
+      process.exit(1);
+    }
     if (failIf(`maestro:${name}`)) {
       out(`Running ${name}\nAssertion is false: id: missing-thing is visible\n`);
       process.exit(1);
@@ -103,7 +142,7 @@ switch (tool) {
     const s = state();
     if (rest[0] === 'emu') {
       if (rest[1] === 'avd') out(`${s.emulator || 'other-avd'}\r\nOK\r\n`);
-      if (rest[1] === 'kill') {
+      if (rest[1] === 'kill' && !failIf('emu-kill')) {
         s.emulator = '';
         save(s);
       }
@@ -111,6 +150,16 @@ switch (tool) {
     else if (rest[0] === 'install') {
       s.versionCode = env.FAKE_APK_VC ?? '16';
       save(s);
+    } else if (rest[0] === 'exec-out' && rest[1] === 'uiautomator') {
+      if (s.anr) {
+        out('<?xml version="1.0"?><hierarchy><node resource-id="android:id/aerr_close" bounds="[66,1170][1014,1302]"/>');
+        out('<node text="Wait" resource-id="android:id/aerr_wait" bounds="[66,1302][1014,1434]"/></hierarchy>');
+      }
+    } else if (cmd === 'shell input tap 540 1368') {
+      s.anr = '';
+      save(s);
+    } else if (cmd === 'shell dumpsys window windows') {
+      out(s.anr ? `  mCurrentFocus=Window{42f u0 Application Not Responding: ${s.anr}}\n` : '  mCurrentFocus=Window{a1e u0 launcher}\n');
     } else if (rest[0] === 'exec-out') {
       if (failIf('screencap')) process.exit(1);
       process.stdout.write(PNG);

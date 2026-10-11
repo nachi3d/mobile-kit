@@ -2,7 +2,7 @@
 // and every external command injected as test/fakes/fake.mjs. mk runs as a
 // real process against it with MK_ROOT set, so release commands refuse to
 // run without --dry-run and nothing can reach R2, EAS, Cloudflare or a device.
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -38,9 +38,13 @@ export interface Fixture {
   root: string;
   avdHome: string;
   run(args: string[], env?: Record<string, string | undefined>, input?: string): Result;
+  /** mk running in the background (a test kills it). */
+  start(args: string[], env?: Record<string, string | undefined>): ChildProcess;
   calls(): string;
   resetCalls(): void;
   state(): Record<string, string>;
+  /** Changes the fake device's state (settings a killed run left behind, …). */
+  setState(patch: Record<string, unknown>): void;
   write(file: string, content: string): void;
 }
 
@@ -89,41 +93,47 @@ export function makeFixture(
   if (options.withApk ?? true) write('dist/ExampleApp-0.2.0.apk', APK_BYTES);
 
   const fake = (tool: string) => JSON.stringify([process.execPath, FAKE, tool]);
+  const mkEnv = (env: Record<string, string | undefined>): NodeJS.ProcessEnv => ({
+    PATH: process.env.PATH,
+    SystemRoot: process.env.SystemRoot,
+    TEMP: process.env.TEMP,
+    TMP: process.env.TMP,
+    MK_ROOT: root,
+    MK_EAS: fake('eas'),
+    MK_WRANGLER: fake('wrangler'),
+    MK_CURL: fake('curl'),
+    MK_ADB: fake('adb'),
+    MK_MAESTRO: fake('maestro'),
+    MK_AAPT: fake('aapt'),
+    MK_APKSIGNER: fake('apksigner'),
+    MK_OPEN: fake('open'),
+    MK_EMULATOR: fake('emulator'),
+    MK_AVDMANAGER: fake('avdmanager'),
+    MK_PROCS: fake('procs'),
+    MK_POLL_MS: '20',
+    MK_SETTLE_MS: '0',
+    MK_STOP_TIMEOUT_MS: '500',
+    ANDROID_AVD_HOME: avdHome,
+    FAKE_LOG: log,
+    FAKE_STATE: stateFile,
+    FAKE_PKG: 'com.example.app',
+    FAKE_VC: '16',
+    ...env, // an undefined value removes the variable
+  });
   return {
     root,
     avdHome,
     write,
     run(args, env = {}, input = '') {
-      const r = spawnSync(process.execPath, [CLI, ...args], {
-        cwd: root,
-        encoding: 'utf8',
-        input,
-        env: {
-          PATH: process.env.PATH,
-          SystemRoot: process.env.SystemRoot,
-          TEMP: process.env.TEMP,
-          TMP: process.env.TMP,
-          MK_ROOT: root,
-          MK_EAS: fake('eas'),
-          MK_WRANGLER: fake('wrangler'),
-          MK_CURL: fake('curl'),
-          MK_ADB: fake('adb'),
-          MK_MAESTRO: fake('maestro'),
-          MK_AAPT: fake('aapt'),
-          MK_APKSIGNER: fake('apksigner'),
-          MK_OPEN: fake('open'),
-          MK_EMULATOR: fake('emulator'),
-          MK_AVDMANAGER: fake('avdmanager'),
-          MK_POLL_MS: '20',
-          ANDROID_AVD_HOME: avdHome,
-          FAKE_LOG: log,
-          FAKE_STATE: stateFile,
-          FAKE_PKG: 'com.example.app',
-          FAKE_VC: '16',
-          ...env, // an undefined value removes the variable
-        },
-      });
+      const r = spawnSync(process.execPath, [CLI, ...args], { cwd: root, encoding: 'utf8', input, env: mkEnv(env) });
       return { status: r.status, out: `${r.stdout}${r.stderr}` };
+    },
+    start(args, env = {}) {
+      return spawn(process.execPath, [CLI, ...args], { cwd: root, env: mkEnv(env), stdio: 'ignore' });
+    },
+    setState(patch) {
+      const current = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : {};
+      fs.writeFileSync(stateFile, JSON.stringify({ ...current, ...patch }));
     },
     calls: () => fs.readFileSync(log, 'utf8'),
     resetCalls: () => fs.writeFileSync(log, ''),
@@ -142,6 +152,7 @@ export function sideEffects(calls: string): string[] {
         /^maestro /.test(l) ||
         /^open /.test(l) ||
         /^(emulator|avdmanager) /.test(l) ||
+        /^procs kill/.test(l) ||
         /^adb .*( install | exec-out |emu kill|settings put global|dismiss-keyguard)/.test(l) ||
         /^adb .*(uimode night \S|settings (put|delete)|set-app-locales)/.test(l) ||
         /^curl .*(-X POST|-o )/.test(l),

@@ -2,12 +2,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fail } from './log.js';
 export const CONFIG_FILE = 'mobile-kit.config.json';
+export const GPU_MODES = ['host', 'swiftshader_indirect', 'angle_indirect', 'guest', 'auto'];
+/** Software rendering, used only when the configured GPU mode fails to boot. */
+export const GPU_FALLBACK = 'swiftshader_indirect';
 export const EMULATOR_DEFAULTS = {
     avd: 'mk-pixel8-api34',
     device: 'pixel_8',
     image: 'system-images;android-34;google_apis_playstore;x86_64',
     ramMb: 4096,
     dataPartition: '8G',
+    gpu: 'host',
+    headless: false,
+    minFreeMb: 2048,
+    maxEmulatorMb: 6144,
 };
 const REQUIRED = [
     'appName',
@@ -54,8 +61,14 @@ export function validateConfig(raw) {
     if (s('signingSha1') && !normalizeSha1(s('signingSha1'))) {
         errors.push('"signingSha1" must be the 20-byte certificate SHA-1, AA:BB:… (eas credentials → Keystore)');
     }
-    if (!isStringArray(raw.screens) || !raw.screens.every((n) => /^[a-z0-9][a-z0-9-]*$/.test(n))) {
-        errors.push('"screens" must be a list of flow names (lowercase, digits, "-"), e.g. ["shelf", "settings"]');
+    const screenName = (n) => typeof n === 'string' && /^[a-z0-9][a-z0-9-]*$/.test(n);
+    const screenOk = (s) => screenName(s) ||
+        (isRecord(s) &&
+            screenName(s.name) &&
+            (s.key === undefined || typeof s.key === 'boolean') &&
+            Object.keys(s).every((k) => k === 'name' || k === 'key'));
+    if (!Array.isArray(raw.screens) || !raw.screens.every(screenOk)) {
+        errors.push('"screens" must be a list of flow names (lowercase, digits, "-") or { "name", "key": true }, e.g. ["settings", { "name": "shelf", "key": true }]');
     }
     if (raw.easProfiles !== undefined) {
         const p = raw.easProfiles;
@@ -92,9 +105,14 @@ export function validateConfig(raw) {
         const ok = isRecord(e) &&
             ['avd', 'device', 'image'].every((k) => e[k] === undefined || (typeof e[k] === 'string' && /^[\w.;-]+$/.test(e[k]))) &&
             (e.ramMb === undefined || (typeof e.ramMb === 'number' && e.ramMb >= 1024)) &&
-            (e.dataPartition === undefined || (typeof e.dataPartition === 'string' && /^\d+[MG]$/.test(e.dataPartition)));
-        if (!ok)
-            errors.push('"emulator" is { "avd", "device", "image", "ramMb" (≥ 1024), "dataPartition" ("8G") }, every key optional');
+            (e.dataPartition === undefined || (typeof e.dataPartition === 'string' && /^\d+[MG]$/.test(e.dataPartition))) &&
+            (e.gpu === undefined || GPU_MODES.includes(e.gpu)) &&
+            (e.headless === undefined || typeof e.headless === 'boolean') &&
+            ['minFreeMb', 'maxEmulatorMb'].every((k) => e[k] === undefined || (typeof e[k] === 'number' && e[k] >= 256));
+        if (!ok) {
+            errors.push(`"emulator" is { "avd", "device", "image", "ramMb" (≥ 1024), "dataPartition" ("8G"), "gpu" (${GPU_MODES.join(', ')}), ` +
+                '"headless" (true/false), "minFreeMb", "maxEmulatorMb" (≥ 256) }, every key optional');
+        }
     }
     return errors;
 }
@@ -124,7 +142,7 @@ export function loadConfig(root) {
         downloadsHost: c.downloadsHost,
         signingSha1: c.signingSha1,
         maestroDir: c.maestroDir,
-        screens: c.screens,
+        screens: c.screens.map((s) => typeof s === 'string' ? { name: s, key: false } : { name: s.name, key: s.key ?? false }),
         easProfiles: { qa: profiles.qa ?? 'preview', release: profiles.release ?? 'production' },
         languages: {
             codes: languages.codes ?? ['en', 'fr'],

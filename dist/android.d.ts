@@ -31,3 +31,14 @@ export declare function getAppLocales(adb: string[], serial: string, pkg: string
 export declare function setAppLocalesArgs(pkg: string, locales: string): string[];
 /** The current screen as PNG bytes, or null. */
 export declare function screencap(adb: string[], serial: string): Buffer | null;
+/** Package of the ANR dialog that has the focus, or null. */
+export declare function focusedAnr(adb: string[], serial: string): string | null;
+/** Centre of the dialog's Wait button (android:id/aerr_wait) in a uiautomator dump. */
+export declare function waitButtonCentre(xml: string): [number, number] | null;
+/**
+ * Another app's ANR dialog (e.g. "Pixel Launcher isn't responding" after a
+ * cold boot) covers the app and fails every flow: tap its Wait button. An
+ * ANR of the app under test is left alone; it is a finding. Returns a note
+ * for the report, or null when there was nothing to do.
+ */
+export declare function dismissForeignAnr(dryRun: boolean, adb: string[], serial: string, appPackage: string): string | null;

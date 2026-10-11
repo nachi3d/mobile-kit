@@ -13,9 +13,16 @@ export interface Shot {
   mode: string;
   lang: string;
   scale: number;
-  /** Relative to the report; absent when the capture failed. */
+  /** Relative to the report; absent when the capture failed or did not run yet. */
   file?: string;
   error?: string;
+}
+
+/** Device settings read before the matrix and put back after it. */
+export interface SavedSettings {
+  night: string;
+  fontScale: string;
+  appLocales: string | null;
 }
 
 export interface QaRun {
@@ -27,8 +34,16 @@ export interface QaRun {
   apk: string;
   device: DeviceInfo;
   startedAt: string;
+  /** Empty while the run is going on, or when it was killed. */
   finishedAt: string;
+  /** The capture folder (absolute), for `--resume`. */
+  outDir: string;
+  /** e.g. "3 key screens × 2 modes × … = 32, in 8 batches" */
+  plan: string;
+  /** The device settings before the first run, restored at the end (kept by --resume). */
+  saved: SavedSettings | null;
   smoke: FlowResult[];
+  /** Every planned screenshot; those not run yet have neither file nor error. */
   shots: Shot[];
   notes: string[];
 }
@@ -42,6 +57,7 @@ export const scaleLabel = (scale: number) => `${scale.toFixed(1)}×`;
 export function renderReport(r: QaRun): string {
   const smokeFailed = r.smoke.filter((f) => !f.ok).length;
   const shotsFailed = r.shots.filter((s) => !s.file).length;
+  const notRun = r.shots.filter((s) => !s.file && !s.error).length;
   const screens = [...new Set(r.shots.map((s) => s.screen))];
   const values = (key: 'mode' | 'lang') => [...new Set(r.shots.map((s) => s[key]))];
   const scales = [...new Set(r.shots.map((s) => s.scale))];
@@ -66,7 +82,9 @@ export function renderReport(r: QaRun): string {
           const label = `${s.mode} · ${s.lang} · ${scaleLabel(s.scale)}`;
           const body = s.file
             ? `<a href="${esc(s.file)}" target="_blank"><img src="${esc(s.file)}" alt="${esc(`${screen} ${label}`)}" loading="lazy"></a>`
-            : `<div class="missing">No screenshot<br><small>${esc(s.error ?? '')}</small></div>`;
+            : s.error
+              ? `<div class="missing">No screenshot<br><small>${esc(s.error)}</small></div>`
+              : '<div class="missing pending">Not captured<br><small>the run stopped before it</small></div>';
           return `<figure data-mode="${esc(s.mode)}" data-lang="${esc(s.lang)}" data-scale="${esc(scaleLabel(s.scale))}">${body}<figcaption>${esc(label)}</figcaption></figure>`;
         })
         .join('\n');
@@ -102,6 +120,8 @@ label { margin-right: 10px; white-space: nowrap; }
 figure { margin: 0; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 6px; }
 figure img { width: 100%; display: block; border-radius: 6px; }
 figcaption { text-align: center; color: var(--muted); padding-top: 4px; font-size: 12px; }
+.incomplete { border: 1px solid var(--fail); border-radius: 8px; padding: 8px 12px; color: var(--fail); }
+.missing.pending { color: var(--muted); }
 .missing { aspect-ratio: 9 / 19; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--fail); padding: 8px; }
 ul.notes { color: var(--muted); }
 </style>
@@ -110,10 +130,18 @@ ul.notes { color: var(--muted); }
 <h1>${esc(r.appName)} ${esc(r.version)} <small>(versionCode ${r.versionCode})</small></h1>
 <p class="meta">${esc(`${d.manufacturer} ${d.model}`.trim())} · Android ${esc(d.androidVersion)} (API ${d.sdk}) · ${esc(d.serial)}<br>
 Installed versionCode: <b class="${vcOk ? 'good' : 'bad'}">${r.installedVersionCode ?? 'none'}</b> · APK: ${esc(r.apk)}<br>
-${esc(r.startedAt)} → ${esc(r.finishedAt)}</p>
+${esc(r.startedAt)} → ${r.finishedAt ? esc(r.finishedAt) : '<b class="bad">not finished</b>'} · Plan: ${esc(r.plan)}</p>
+${
+  r.finishedAt && !notRun
+    ? ''
+    : `<p class="incomplete">Incomplete run: ${notRun} screenshot(s) not captured. Continue it with<br><code>mk qa:device --resume ${esc(r.outDir)}</code> (add <code>--emulator</code> for the emulator).</p>`
+}
 <p class="summary">
 <span class="${smokeFailed ? 'bad' : 'good'}">Smoke: ${r.smoke.length - smokeFailed}/${r.smoke.length} passed</span>
-<span class="${shotsFailed ? 'bad' : 'good'}">Screenshots: ${r.shots.length - shotsFailed}/${r.shots.length}</span>
+<span class="${shotsFailed ? 'bad' : 'good'}">Screenshots: ${r.shots.length - shotsFailed}/${r.shots.length}</span>${
+    notRun ? `
+<span class="bad">Not captured: ${notRun}</span>` : ''
+  }
 </p>
 ${r.notes.length ? `<ul class="notes">${r.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
 <h2>Maestro smoke flows</h2>

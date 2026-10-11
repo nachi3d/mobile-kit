@@ -18,6 +18,10 @@ export interface LanguageConfig {
     /** "flow" / "deep-link": value set at the end, e.g. "system". */
     restore?: string;
 }
+export declare const GPU_MODES: readonly ["host", "swiftshader_indirect", "angle_indirect", "guest", "auto"];
+export type GpuMode = (typeof GPU_MODES)[number];
+/** Software rendering, used only when the configured GPU mode fails to boot. */
+export declare const GPU_FALLBACK: GpuMode;
 export interface EmulatorConfig {
     /** AVD name. Default "mk-pixel8-api34". */
     avd: string;
@@ -25,11 +29,32 @@ export interface EmulatorConfig {
     device: string;
     /** sdkmanager package of the system image. */
     image: string;
-    /** config.ini values set on every start: RAM (MB), data partition, keyboard. */
+    /** config.ini values set on every start: RAM (MB), data partition, keyboard, GPU. */
     ramMb: number;
     dataPartition: string;
+    /**
+     * Default "host": the PC's graphics card. Software rendering
+     * (swiftshader) grew the emulator past 14 GB of host memory during a
+     * screenshot run. If the emulator fails to boot with this mode, mk retries
+     * once with swiftshader_indirect.
+     */
+    gpu: GpuMode;
+    /** Start without a window (-no-window). Default false. */
+    headless: boolean;
+    /** qa:device restarts the emulator when free host RAM falls below this (MB). Default 2048. */
+    minFreeMb: number;
+    /** …or when the emulator process uses more than this (MB). Default 6144. */
+    maxEmulatorMb: number;
 }
 export declare const EMULATOR_DEFAULTS: EmulatorConfig;
+export interface ScreenConfig {
+    name: string;
+    /**
+     * Key screens get the full matrix (every mode × language × font scale);
+     * the others only light and dark, in the first language, at scale 1.0.
+     */
+    key: boolean;
+}
 export interface KitConfig {
     appName: string;
     androidPackage: string;
@@ -43,8 +68,11 @@ export interface KitConfig {
     signingSha1: string;
     /** Maestro folder, relative to the app root: smoke/ and screens/ inside. */
     maestroDir: string;
-    /** Screen flows to screenshot: <maestroDir>/screens/<name>.yaml */
-    screens: string[];
+    /**
+     * Screen flows to screenshot: <maestroDir>/screens/<name>.yaml. In the
+     * config file each entry is "<name>" or { "name": "<name>", "key": true }.
+     */
+    screens: ScreenConfig[];
     /** EAS build profiles. Defaults: qa "preview", release "production". */
     easProfiles: {
         qa: string;
