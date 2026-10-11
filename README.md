@@ -191,6 +191,43 @@ asks `Promote <version> to latest? [y/N]`. On `y` it:
    | `CF_PURGE_TOKEN` | the cache-purge token below |
    | `EXPO_TOKEN` | optional: expo.dev → Account settings → Access tokens |
 
+### Keep the SDK, AVDs and caches on a drive with space
+
+The tools below take 15 GB or more, mostly the system image and the AVD's
+data. On a small system drive, keep them on a data drive, e.g. `D:\Dev`,
+and point the tools there with **user** environment variables: System
+Properties → Environment Variables, or
+`[Environment]::SetEnvironmentVariable('NAME', 'value', 'User')`. Avoid
+`setx` for PATH, which truncates at 1024 characters.
+
+| What | Variable or setting | Example |
+|---|---|---|
+| Android SDK (platform-tools, emulator, build-tools, system images) | `ANDROID_HOME`, `ANDROID_SDK_ROOT` | `D:\Dev\Android\Sdk` |
+| AVDs (the emulator's disks, ~7 GB each) | `ANDROID_AVD_HOME` | `D:\Dev\Android\avd` |
+| Gradle (local Android builds) | `GRADLE_USER_HOME` | `D:\Dev\gradle` |
+| npm cache (npx included) | `npm config set cache D:\Dev\npm-cache` | `D:\Dev\npm-cache` |
+| Maestro | PATH entry `…\maestro\bin`; `MAESTRO_CLI_NO_ANALYTICS=1` | `D:\Dev\maestro` |
+| Playwright browsers | `PLAYWRIGHT_BROWSERS_PATH` | `D:\Dev\ms-playwright` |
+| Temp files (Jest cache, Metro, EAS uploads, test fixtures) | `TEMP`, `TMP` | `D:\Dev\Temp` |
+
+PATH (user) entries for the SDK:
+- `%ANDROID_HOME%\platform-tools`
+- `%ANDROID_HOME%\emulator`
+- `%ANDROID_HOME%\cmdline-tools\latest\bin`
+- `%ANDROID_HOME%\build-tools\<version>`
+
+Keep **one** adb on PATH: two adb versions keep restarting each other's
+server.
+
+**Moving an existing AVD.**
+1. Copy the `avd` folder to its new place.
+2. Set `ANDROID_AVD_HOME`.
+3. Edit `<name>.ini` there so that `path=` is the new `<name>.avd` folder.
+4. Check: `emulator -list-avds`.
+
+mk finds the SDK through `ANDROID_HOME` and the AVDs through
+`ANDROID_AVD_HOME`. Open a new terminal after changing a variable.
+
 ### Cloudflare cache-purge token
 
 Dashboard → My Profile → **API Tokens** → Create Token → **Create Custom
