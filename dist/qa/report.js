@@ -38,7 +38,8 @@ export function renderReport(r) {
     })
         .join('\n');
     const d = r.device;
-    const vcOk = r.installedVersionCode === r.versionCode;
+    const vcOk = r.versionCode !== null && r.installedVersionCode === r.versionCode;
+    const vcFrom = r.versionCodeFrom ? `, from ${esc(r.versionCodeFrom)}` : '';
     return `<!doctype html>
 <html lang="en">
 <head>
@@ -74,7 +75,7 @@ details summary { cursor: pointer; color: var(--muted); }
 </style>
 </head>
 <body>
-<h1>${esc(r.appName)} ${esc(r.version)} <small>(versionCode ${r.versionCode})</small></h1>
+<h1>${esc(r.appName)} ${esc(r.version)} <small>(versionCode ${r.versionCode ?? 'unknown'}${vcFrom})</small></h1>
 <p class="meta">${esc(`${d.manufacturer} ${d.model}`.trim())} · Android ${esc(d.androidVersion)} (API ${d.sdk}) · ${esc(d.serial)}<br>
 Installed versionCode: <b class="${vcOk ? 'good' : 'bad'}">${r.installedVersionCode ?? 'none'}</b> · APK: ${esc(r.apk)}<br>
 ${esc(r.startedAt)} → ${r.finishedAt ? esc(r.finishedAt) : '<b class="bad">not finished</b>'} · Plan: ${esc(r.plan)}</p>

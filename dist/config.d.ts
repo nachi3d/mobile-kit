@@ -93,8 +93,17 @@ export declare function validateConfig(raw: unknown): string[];
 export declare function loadConfig(root: string): KitConfig;
 export interface AppJson {
     version: string;
-    versionCode: number;
+    /**
+     * The versionCode pinned in app.json, or null when it is EAS's
+     * (`appVersionSource: "remote"`): then the expected versionCode is read
+     * from the build itself (the APK, or EAS's `appBuildVersion`).
+     */
+    versionCode: number | null;
     androidPackage: string;
 }
-/** Version, versionCode and package of the Expo app.json. */
+/**
+ * Version, versionCode and package of the Expo app.json. No
+ * `expo.android.versionCode` means EAS numbers the builds (remote); one
+ * that eas.json's `appVersionSource: "remote"` overrides is ignored.
+ */
 export declare function readAppJson(root: string): AppJson;

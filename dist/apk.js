@@ -11,9 +11,24 @@ export function isApk(file) {
 }
 export const fileSize = (file) => fs.statSync(file).size;
 export const sha256 = (file) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+/** Package, versionName and versionCode of an APK (aapt2), or null without build-tools. */
+export function readBadging(file, aapt) {
+    if (aapt.length === 0)
+        return null;
+    const badging = run(aapt, ['dump', 'badging', file]);
+    const line = badging.stdout.split('\n').find((l) => l.startsWith('package:'));
+    if (badging.status !== 0 || !line)
+        fail(`aapt2 cannot read ${file}`);
+    const field = (name) => new RegExp(` ${name}='([^']*)'`).exec(line)?.[1] ?? '';
+    const versionCode = Number(field('versionCode'));
+    if (!/^\d+$/.test(field('versionCode')))
+        fail(`aapt2: no versionCode in ${file}`);
+    return { androidPackage: field('name'), versionName: field('versionName'), versionCode };
+}
 /**
  * Package, versionName, versionCode (aapt2) and signing certificate
- * (apksigner). Without build-tools: a clear warning, the rest goes on.
+ * (apksigner). Returns the APK's versionCode. Without build-tools: a clear
+ * warning, the rest goes on, and null.
  */
 export function verifyApk(file, expect, aapt, apksigner) {
     if (!isApk(file))
@@ -21,19 +36,15 @@ export function verifyApk(file, expect, aapt, apksigner) {
     if (aapt.length === 0 || apksigner.length === 0) {
         warn('Android build-tools (aapt2, apksigner) not found: package, version and signature NOT verified. ' +
             'Install them (Android Studio → SDK Manager → SDK Tools → Android SDK Build-Tools) or set ANDROID_HOME.');
-        return;
+        return null;
     }
-    const badging = run(aapt, ['dump', 'badging', file]);
-    const line = badging.stdout.split('\n').find((l) => l.startsWith('package:'));
-    if (badging.status !== 0 || !line)
-        fail(`aapt2 cannot read ${file}`);
-    const field = (name) => new RegExp(` ${name}='([^']*)'`).exec(line)?.[1] ?? '';
-    if (field('name') !== expect.androidPackage)
-        fail(`Package is '${field('name')}', expected ${expect.androidPackage}`);
-    if (field('versionName') !== expect.version)
-        fail(`versionName is '${field('versionName')}', expected ${expect.version}`);
-    if (field('versionCode') !== String(expect.versionCode)) {
-        fail(`versionCode is '${field('versionCode')}', app.json says ${expect.versionCode}`);
+    const apk = readBadging(file, aapt);
+    if (apk.androidPackage !== expect.androidPackage)
+        fail(`Package is '${apk.androidPackage}', expected ${expect.androidPackage}`);
+    if (apk.versionName !== expect.version)
+        fail(`versionName is '${apk.versionName}', expected ${expect.version}`);
+    if (expect.versionCode !== null && apk.versionCode !== expect.versionCode) {
+        fail(`versionCode is '${apk.versionCode}', ${expect.versionCodeFrom} says ${expect.versionCode}`);
     }
     const certs = run(apksigner, ['verify', '--print-certs', file]);
     if (certs.status !== 0)
@@ -46,5 +57,6 @@ export function verifyApk(file, expect, aapt, apksigner) {
     if (actual !== expect.sha1) {
         fail(`Signing certificate SHA-1 is '${actual}', mobile-kit.config.json says ${expect.sha1}. Wrong keystore: do not publish.`);
     }
-    info(`APK OK: ${expect.androidPackage} ${expect.version} (${expect.versionCode}), signed with the expected key`);
+    info(`APK OK: ${expect.androidPackage} ${expect.version} (${apk.versionCode}), signed with the expected key`);
+    return apk.versionCode;
 }

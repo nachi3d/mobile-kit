@@ -59,9 +59,15 @@ function failFlow(name, step, error) {
 }
 
 switch (tool) {
-  case 'eas':
-    out(JSON.stringify([{ status: 'FINISHED', artifacts: { applicationArchiveUrl: 'https://expo.invalid/build.apk' } }]));
+  case 'eas': {
+    // appBuildVersion: EAS's versionCode of the build (a string, like EAS's JSON).
+    const build = { status: 'FINISHED', appBuildVersion: env.FAKE_EAS_VC ?? '16', artifacts: { applicationArchiveUrl: 'https://expo.invalid/build.apk' } };
+    if (args[0] === 'build:list') {
+      if (failIf('build:list')) process.exit(1);
+      out(JSON.stringify(env.FAKE_EAS_NO_BUILDS ? [] : [build]));
+    } else out(JSON.stringify([build]));
     break;
+  }
   case 'wrangler':
   case 'open':
     break;

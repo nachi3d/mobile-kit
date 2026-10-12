@@ -12,7 +12,8 @@ export const LATEST_MAX_AGE_LIMIT = 60;
 
 export interface ReleaseTarget {
   version: string;
-  versionCode: number;
+  /** app.json's, or null when EAS numbers the builds (read from the build). */
+  versionCode: number | null;
   apkFile: string;
   apkPath: string;
   versionedKey: string;

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { fail } from './log.js';
+import { fail, warn } from './log.js';
 
 export const CONFIG_FILE = 'mobile-kit.config.json';
 
@@ -253,11 +253,32 @@ export function loadConfig(root: string): KitConfig {
 
 export interface AppJson {
   version: string;
-  versionCode: number;
+  /**
+   * The versionCode pinned in app.json, or null when it is EAS's
+   * (`appVersionSource: "remote"`): then the expected versionCode is read
+   * from the build itself (the APK, or EAS's `appBuildVersion`).
+   */
+  versionCode: number | null;
   androidPackage: string;
 }
 
-/** Version, versionCode and package of the Expo app.json. */
+/** `cli.appVersionSource` of eas.json, or null (no eas.json, not set, unreadable). */
+function easVersionSource(root: string): string | null {
+  const file = path.join(root, 'eas.json');
+  if (!fs.existsSync(file)) return null;
+  try {
+    const json = JSON.parse(fs.readFileSync(file, 'utf8')) as { cli?: { appVersionSource?: unknown } };
+    return typeof json.cli?.appVersionSource === 'string' ? json.cli.appVersionSource : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Version, versionCode and package of the Expo app.json. No
+ * `expo.android.versionCode` means EAS numbers the builds (remote); one
+ * that eas.json's `appVersionSource: "remote"` overrides is ignored.
+ */
 export function readAppJson(root: string): AppJson {
   const file = path.join(root, 'app.json');
   if (!fs.existsSync(file)) fail(`No app.json in ${root}`);
@@ -272,7 +293,13 @@ export function readAppJson(root: string): AppJson {
   const { version } = expo;
   const { versionCode, package: androidPackage } = android;
   if (typeof version !== 'string') fail('app.json has no expo.version');
-  if (typeof versionCode !== 'number') fail('app.json has no expo.android.versionCode');
+  if (versionCode !== undefined && (typeof versionCode !== 'number' || !Number.isInteger(versionCode))) {
+    fail('app.json expo.android.versionCode is not a whole number');
+  }
   if (typeof androidPackage !== 'string') fail('app.json has no expo.android.package');
-  return { version, versionCode, androidPackage };
+  if (versionCode !== undefined && easVersionSource(root) === 'remote') {
+    warn(`app.json expo.android.versionCode (${versionCode}) is ignored: eas.json sets appVersionSource "remote", EAS numbers the builds`);
+    return { version, versionCode: null, androidPackage };
+  }
+  return { version, versionCode: versionCode ?? null, androidPackage };
 }

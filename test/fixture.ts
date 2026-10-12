@@ -58,6 +58,10 @@ export function makeFixture(
     withApk?: boolean;
     envLocal?: string | null;
     smoke?: Record<string, string>;
+    /** expo.android.versionCode of app.json; null: none (EAS numbers the builds, like GameTrack). */
+    versionCode?: number | null;
+    /** eas.json content; none by default. */
+    easJson?: Record<string, unknown>;
   } = {},
 ): Fixture {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mk-test-'));
@@ -72,7 +76,10 @@ export function makeFixture(
   };
   fs.mkdirSync(root);
   fs.writeFileSync(log, '');
-  write('app.json', JSON.stringify({ expo: { version: '0.2.0', android: { package: 'com.example.app', versionCode: 16 } } }));
+  const versionCode = options.versionCode === undefined ? 16 : options.versionCode;
+  const android = { package: 'com.example.app', ...(versionCode !== null ? { versionCode } : {}) };
+  write('app.json', JSON.stringify({ expo: { version: '0.2.0', android } }));
+  if (options.easJson) write('eas.json', JSON.stringify(options.easJson, null, 2));
   write('mobile-kit.config.json', JSON.stringify({ ...BASE_CONFIG, ...options.config }, null, 2));
   write('.gitignore', 'dist/\n*.apk\n.env.local\n.images/\n');
   const smoke = options.smoke ?? {
@@ -148,7 +155,7 @@ export function sideEffects(calls: string): string[] {
     .split('\n')
     .filter(
       (l) =>
-        /^eas /.test(l) ||
+        /^eas (?!build:list )/.test(l) ||
         /^wrangler /.test(l) ||
         /^maestro /.test(l) ||
         /^open /.test(l) ||

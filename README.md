@@ -47,8 +47,8 @@ On the one connected phone or emulator:
 5. **Leftovers.** Maestro processes that a killed run left on the device
    are stopped.
 6. **Install.** Runs `adb install -r`, which keeps the data. The installed
-   versionCode (`dumpsys package`) must equal `app.json`, otherwise it
-   stops before testing.
+   versionCode (`dumpsys package`) must equal the expected one, otherwise
+   it stops before testing (see [versionCode](#versioncode)).
 7. **Smoke.** Runs every `<maestroDir>/smoke/*.yaml` in name order, one
    after the other. Files starting with `_` are subflows and are skipped.
 8. **Screenshots, in batches.** One batch per device setting: night mode
@@ -110,7 +110,8 @@ Ctrl+C, out of memory):
   and takes only the missing ones.
 - It restores the device settings the **first** run saved, even if the
   killed run left dark mode or 1.3× on.
-- It refuses a folder of another version or versionCode.
+- It refuses a folder of another version or versionCode (app.json's, or,
+  with EAS numbering, the one installed on the device).
 
 Example: `npm run qa:device -- --emulator --yes --resume
 .images/captures/2026-10-11-v0.3.0`.
@@ -192,13 +193,42 @@ Then it:
 1. runs the EAS build of the `release` profile (default `production`) and
    downloads `dist/<apkName>-<version>.apk`;
 2. verifies the package, versionName and versionCode with `aapt2`, and the
-   signature and certificate SHA-1 (= `signingSha1`) with `apksigner`;
+   signature and certificate SHA-1 (= `signingSha1`) with `apksigner`. The
+   versionCode must be app.json's, or, with EAS numbering, the one EAS gave
+   this build (see [versionCode](#versioncode));
 3. uploads only the versioned key, with `Cache-Control: public,
    max-age=31536000, immutable`;
 4. if exactly one phone is on adb, installs with `adb install -r` and
    prints the installed versionCode.
 
 Without Android build-tools it warns clearly and skips only step 2.
+
+**release:promote** also reads the versionCode of `dist/<apkName>-<version>.apk`
+(`aapt2`): it must be app.json's when the app pins one; with EAS numbering
+it is printed.
+
+### versionCode
+
+mk never guesses the versionCode the device must end up with. Where it
+comes from depends on the app, detected automatically (no config key):
+
+- **Local** — `app.json` has `expo.android.versionCode` (BookTrack): that
+  number, everywhere.
+- **Remote** — no `expo.android.versionCode` in `app.json`, or eas.json
+  sets `"cli": {"appVersionSource": "remote"}` (then an app.json value is
+  ignored, with a warning: EAS ignores it too). EAS numbers the builds, so
+  mk reads it from the build under test:
+
+  | Command | Expected versionCode |
+  | --- | --- |
+  | `qa:device` (EAS build) | the APK's (`aapt2`), which must equal EAS's `appBuildVersion` |
+  | `qa:device --apk` | the APK's (`aapt2`; without build-tools it stops) |
+  | `qa:device --skip-build` | the latest **finished** EAS build of the `qa` profile (`eas build:list`, read-only) |
+  | `qa:device --resume` | the resumed run's |
+  | `release:build` | EAS's `appBuildVersion` of the build; the APK must carry it |
+
+  `results.json` and the report say which source was used. A dry run that
+  built nothing does not know it and says so.
 
 **release:promote** refuses unless the versioned object is on R2 with the
 same size as `dist/`, and `.env.local` has the Cloudflare settings. It then
