@@ -1,0 +1,106 @@
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+/** Links to the copy of Maestro's debug folder (its log and screenshots). */
+const debugLinks = (dir) => dir
+    ? `<small class="debug"><a href="${esc(dir)}/" target="_blank">debug folder</a> · <a href="${esc(dir)}/maestro.log" target="_blank">maestro.log</a></small>`
+    : '';
+export const scaleLabel = (scale) => `${scale.toFixed(1)}×`;
+/** The QA gallery: one self-contained page next to the PNGs. */
+export function renderReport(r) {
+    const smokeFailed = r.smoke.filter((f) => !f.ok).length;
+    const shotsFailed = r.shots.filter((s) => !s.file).length;
+    const notRun = r.shots.filter((s) => !s.file && !s.error).length;
+    const screens = [...new Set(r.shots.map((s) => s.screen))];
+    const values = (key) => [...new Set(r.shots.map((s) => s[key]))];
+    const scales = [...new Set(r.shots.map((s) => s.scale))];
+    const smokeRows = r.smoke
+        .map((f) => `<tr class="${f.ok ? 'pass' : 'fail'}"><td>${f.ok ? 'PASS' : 'FAIL'}</td><td>${esc(f.flow)}</td>` +
+        `<td>${f.seconds.toFixed(1)} s</td><td>${f.errorLine ? `<b>${esc(f.errorLine)}</b>` : ''}${debugLinks(f.debug)}` +
+        `${f.error ? `<details><summary>Maestro output</summary><pre>${esc(f.error)}</pre></details>` : ''}</td></tr>`)
+        .join('\n');
+    const filter = (name, items) => `<fieldset><legend>${name}</legend>${items
+        .map((v) => `<label><input type="checkbox" data-filter="${esc(name)}" value="${esc(v)}" checked> ${esc(v)}</label>`)
+        .join('')}</fieldset>`;
+    const sections = screens
+        .map((screen) => {
+        const figures = r.shots
+            .filter((s) => s.screen === screen)
+            .map((s) => {
+            const label = `${s.mode} · ${s.lang} · ${scaleLabel(s.scale)}`;
+            const body = s.file
+                ? `<a href="${esc(s.file)}" target="_blank"><img src="${esc(s.file)}" alt="${esc(`${screen} ${label}`)}" loading="lazy"></a>`
+                : s.error
+                    ? `<div class="missing">No screenshot<br><small>${esc(s.error)}</small>${debugLinks(s.debug)}</div>`
+                    : '<div class="missing pending">Not captured<br><small>the run stopped before it</small></div>';
+            return `<figure data-mode="${esc(s.mode)}" data-lang="${esc(s.lang)}" data-scale="${esc(scaleLabel(s.scale))}">${body}<figcaption>${esc(label)}</figcaption></figure>`;
+        })
+            .join('\n');
+        return `<section><h2>${esc(screen)}</h2><div class="grid">${figures}</div></section>`;
+    })
+        .join('\n');
+    const d = r.device;
+    const vcOk = r.installedVersionCode === r.versionCode;
+    return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(r.appName)} ${esc(r.version)} QA</title>
+<style>
+:root { --bg: #f6f4f0; --fg: #1d1b18; --muted: #6b645c; --card: #fff; --line: #ddd5c8; --pass: #2f6b45; --fail: #a8432f; }
+@media (prefers-color-scheme: dark) { :root { --bg: #161311; --fg: #eee6da; --muted: #a99d8f; --card: #221d19; --line: #3a3029; --pass: #8cc09e; --fail: #e8876f; } }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, sans-serif; }
+h1 { margin: 0 0 4px; font-size: 22px; } h2 { margin: 28px 0 10px; font-size: 18px; }
+.meta { color: var(--muted); margin: 0 0 12px; }
+.summary span { display: inline-block; margin: 0 12px 6px 0; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line); }
+.bad { color: var(--fail); border-color: var(--fail) !important; } .good { color: var(--pass); border-color: var(--pass) !important; }
+table { border-collapse: collapse; width: 100%; background: var(--card); }
+td { border-top: 1px solid var(--line); padding: 6px 8px; vertical-align: top; }
+tr.pass td:first-child { color: var(--pass); font-weight: 700; } tr.fail td:first-child { color: var(--fail); font-weight: 700; }
+pre { margin: 0; white-space: pre-wrap; font-size: 12px; max-height: 12em; overflow: auto; }
+.filters { position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 0; background: var(--bg); }
+fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 2px 10px 6px; } legend { color: var(--muted); }
+label { margin-right: 10px; white-space: nowrap; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
+figure { margin: 0; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 6px; }
+figure img { width: 100%; display: block; border-radius: 6px; }
+figcaption { text-align: center; color: var(--muted); padding-top: 4px; font-size: 12px; }
+.incomplete { border: 1px solid var(--fail); border-radius: 8px; padding: 8px 12px; color: var(--fail); }
+.missing.pending { color: var(--muted); }
+.missing { aspect-ratio: 9 / 19; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--fail); padding: 8px; }
+ul.notes { color: var(--muted); }
+small.debug { display: block; margin-top: 4px; } a { color: inherit; }
+details summary { cursor: pointer; color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>${esc(r.appName)} ${esc(r.version)} <small>(versionCode ${r.versionCode})</small></h1>
+<p class="meta">${esc(`${d.manufacturer} ${d.model}`.trim())} · Android ${esc(d.androidVersion)} (API ${d.sdk}) · ${esc(d.serial)}<br>
+Installed versionCode: <b class="${vcOk ? 'good' : 'bad'}">${r.installedVersionCode ?? 'none'}</b> · APK: ${esc(r.apk)}<br>
+${esc(r.startedAt)} → ${r.finishedAt ? esc(r.finishedAt) : '<b class="bad">not finished</b>'} · Plan: ${esc(r.plan)}</p>
+${r.finishedAt && !notRun
+        ? ''
+        : `<p class="incomplete">Incomplete run: ${notRun} screenshot(s) not captured. Continue it with<br><code>mk qa:device --resume ${esc(r.outDir)}</code> (add <code>--emulator</code> for the emulator).</p>`}
+<p class="summary">
+<span class="${smokeFailed ? 'bad' : 'good'}">Smoke: ${r.smoke.length - smokeFailed}/${r.smoke.length} passed</span>
+<span class="${shotsFailed ? 'bad' : 'good'}">Screenshots: ${r.shots.length - shotsFailed}/${r.shots.length}</span>${notRun ? `
+<span class="bad">Not captured: ${notRun}</span>` : ''}
+</p>
+${r.notes.length ? `<ul class="notes">${r.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
+<h2>Maestro smoke flows</h2>
+${r.smoke.length ? `<table>${smokeRows}</table>` : '<p class="meta">None run.</p>'}
+<div class="filters">${filter('mode', values('mode'))}${filter('lang', values('lang'))}${filter('scale', scales.map(scaleLabel))}</div>
+${sections}
+<script>
+document.addEventListener('change', () => {
+  const on = (name) => [...document.querySelectorAll('input[data-filter="' + name + '"]:checked')].map((i) => i.value);
+  const sel = { mode: on('mode'), lang: on('lang'), scale: on('scale') };
+  document.querySelectorAll('figure').forEach((f) => {
+    f.hidden = !(sel.mode.includes(f.dataset.mode) && sel.lang.includes(f.dataset.lang) && sel.scale.includes(f.dataset.scale));
+  });
+});
+</script>
+</body>
+</html>
+`;
+}
