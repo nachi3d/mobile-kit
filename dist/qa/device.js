@@ -7,7 +7,11 @@
 //      language × font scale; the others light/dark, first language, 1.0);
 //   2. APK: --apk, else an EAS build of the "qa" profile (--skip-build or
 //      --resume: no build and no install, test what is installed);
-//   3. adb install -r, then the installed versionCode must be app.json's;
+//   3. adb install -r, then the installed versionCode must be the expected
+//      one: app.json's when the app pins it; otherwise (EAS numbers the
+//      builds) the APK's own (aapt2, cross-checked with EAS's
+//      appBuildVersion when mk built it), the latest EAS build of the qa
+//      profile with --skip-build, or the resumed run's with --resume;
 //   4. Maestro smoke flows (<maestroDir>/smoke/*.yaml, in name order);
 //   5. screenshots in batches of one device setting, captured with adb
 //      screencap. With --emulator, the emulator is cold-restarted before
@@ -27,8 +31,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { deviceInfo, dismissForeignAnr, getAppLocales, getFontScale, getNightMode, installedVersionCode, listDevices, requireOneDevice, screencap, setAppLocalesArgs, setFontScaleArgs, shellAct, } from '../android.js';
-import { isApk } from '../apk.js';
-import { easBuild } from '../eas.js';
+import { isApk, readBadging } from '../apk.js';
+import { easBuild, latestBuildVersion } from '../eas.js';
 import { ensureEmulator, isEmulatorSerial, stopEmulator } from '../emulator.js';
 import { act, run } from '../exec.js';
 import { hostMemory, killLeftoverMaestro, memoryPressure } from '../host.js';
@@ -158,6 +162,44 @@ function loadRun(dir) {
         fail(`--resume: ${file} is not valid JSON: ${e.message}`);
     }
 }
+/**
+ * The versionCode the device must have after the install. app.json's when
+ * the app pins one; otherwise the build's: the resumed run's, the APK's
+ * (aapt2) checked against EAS's appBuildVersion when mk built it, or the
+ * latest finished EAS build of the qa profile (--skip-build).
+ */
+export function expectedVersionCode(p, o, s) {
+    if (p.app.versionCode !== null)
+        return { versionCode: p.app.versionCode, from: 'app.json' };
+    if (s.previous) {
+        if (s.previous.versionCode === null)
+            fail('--resume: that run never knew its versionCode (a dry run?). Start a new run instead.');
+        return { versionCode: s.previous.versionCode, from: 'the resumed run' };
+    }
+    if (s.apk && fs.existsSync(s.apk)) {
+        const badging = readBadging(s.apk, p.tool.aapt);
+        if (!badging) {
+            if (s.builtVc !== null)
+                return { versionCode: s.builtVc, from: 'the EAS build' };
+            fail('This app has no versionCode in app.json (EAS numbers the builds), so mk reads it from the APK, ' +
+                'and that needs aapt2: install the Android build-tools or set ANDROID_HOME.');
+        }
+        if (badging.androidPackage !== p.config.androidPackage) {
+            fail(`${path.basename(s.apk)} is ${badging.androidPackage}, not ${p.config.androidPackage}`);
+        }
+        if (s.builtVc !== null && badging.versionCode !== s.builtVc) {
+            fail(`The downloaded APK has versionCode ${badging.versionCode}, but EAS built ${s.builtVc}: not the build that just ran.`);
+        }
+        return { versionCode: badging.versionCode, from: s.builtVc !== null ? 'the EAS build' : 'the APK' };
+    }
+    if (s.builtVc !== null)
+        return { versionCode: s.builtVc, from: 'the EAS build' };
+    if (o.skipBuild) {
+        const profile = p.config.easProfiles.qa;
+        return { versionCode: latestBuildVersion(p, profile), from: `the latest EAS ${profile} build` };
+    }
+    return { versionCode: null, from: 'EAS numbers the builds and nothing was built on this dry run' };
+}
 export async function qaDevice(args) {
     const o = parseQaArgs(args);
     const p = openProject({ dryRun: o.dryRun, requireDryRunInFixture: false });
@@ -185,9 +227,13 @@ export async function qaDevice(args) {
     if (o.resume) {
         outDir = path.resolve(o.resume);
         previous = loadRun(outDir);
-        if (previous.androidPackage !== config.androidPackage || previous.version !== app.version || previous.versionCode !== app.versionCode) {
-            fail(`--resume: that run tested ${previous.androidPackage} ${previous.version} (versionCode ${previous.versionCode}); ` +
-                `app.json is ${app.version} (versionCode ${app.versionCode}). Start a new run instead.`);
+        // With EAS numbering, app.json has no versionCode: the run's own is
+        // checked against the device below.
+        const vcDiffers = app.versionCode !== null && previous.versionCode !== app.versionCode;
+        if (previous.androidPackage !== config.androidPackage || previous.version !== app.version || vcDiffers) {
+            const appVc = app.versionCode !== null ? ` (versionCode ${app.versionCode})` : '';
+            fail(`--resume: that run tested ${previous.androidPackage} ${previous.version} (versionCode ${previous.versionCode ?? 'unknown'}); ` +
+                `app.json is ${app.version}${appVc}. Start a new run instead.`);
         }
         info(`Resuming ${outDir}`);
     }
@@ -216,6 +262,8 @@ export async function qaDevice(args) {
     // --- APK -----------------------------------------------------------------
     let apk = null;
     let apkLabel;
+    /** EAS's versionCode of the build mk just ran. */
+    let builtVc = null;
     if (o.apk) {
         apk = path.resolve(o.apk);
         if (!isApk(apk))
@@ -228,9 +276,15 @@ export async function qaDevice(args) {
     else {
         apk = path.join(p.root, 'dist', `${config.apkName}-${app.version}-qa.apk`);
         apkLabel = `EAS ${config.easProfiles.qa} build → ${path.basename(apk)}`;
-        if (!easBuild(p, config.easProfiles.qa, apk))
+        const built = easBuild(p, config.easProfiles.qa, apk);
+        builtVc = built.appBuildVersion;
+        if (!built.downloaded)
             apk = p.dryRun ? apk : null;
     }
+    // --- Expected versionCode -------------------------------------------------
+    const expected = expectedVersionCode(p, o, { apk, builtVc, previous });
+    if (expected.versionCode !== null)
+        info(`Expected versionCode ${expected.versionCode} (${expected.from})`);
     // --- Smoke flows still to run; those that wipe the app's data ask first --
     const smokeDone = new Set((previous?.smoke ?? []).map((f) => f.flow));
     const flowName = (file) => path.relative(maestroDir, file).replace(/\\/g, '/');
@@ -255,15 +309,18 @@ export async function qaDevice(args) {
             fail('adb install failed');
     }
     const installed = installedVersionCode(p.tool.adb, serial, config.androidPackage);
-    if (installed !== app.versionCode) {
-        const message = `Installed versionCode is ${installed ?? 'none'}, app.json says ${app.versionCode}.`;
+    if (expected.versionCode === null) {
+        warn(`Installed versionCode is ${installed ?? 'none'}; the expected one is unknown (${expected.from}). A real run knows it.`);
+    }
+    else if (installed !== expected.versionCode) {
+        const message = `Installed versionCode is ${installed ?? 'none'}, ${expected.from} says ${expected.versionCode}.`;
         if (p.dryRun)
             warn(`${message} (dry run: nothing was installed; a real run stops here)`);
         else
             fail(`${message} Wrong build on the device: stopped before testing.`);
     }
     else
-        info(`Installed versionCode ${installed} = app.json`);
+        info(`Installed versionCode ${installed} = ${expected.from}`);
     // --- Languages -----------------------------------------------------------
     const notes = [];
     let languages = config.languages.codes;
@@ -291,7 +348,8 @@ export async function qaDevice(args) {
         appName: config.appName,
         androidPackage: config.androidPackage,
         version: app.version,
-        versionCode: app.versionCode,
+        versionCode: expected.versionCode,
+        versionCodeFrom: expected.from,
         installedVersionCode: installed,
         apk: apkLabel,
         device,

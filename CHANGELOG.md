@@ -3,6 +3,27 @@
 All notable changes are listed here ([Keep a Changelog](https://keepachangelog.com/),
 [SemVer](https://semver.org/)).
 
+## [0.2.2] - 2026-10-12
+
+GameTrack numbers its Android builds on EAS (`appVersionSource: "remote"`)
+and has no versionCode in app.json, so every mk command stopped at "app.json
+has no expo.android.versionCode".
+
+### Changed
+- The expected versionCode comes from the build under test when EAS numbers
+  the builds: the APK (`aapt2`), checked against EAS's `appBuildVersion`
+  when mk ran the build; the latest finished EAS build of the `qa` profile
+  with `qa:device --skip-build`; the resumed run's with `--resume`.
+  README → versionCode.
+- Remote is detected, not configured: no `expo.android.versionCode` in
+  app.json, or eas.json `cli.appVersionSource: "remote"` (an app.json value
+  is then ignored, with a warning). Apps that pin it in app.json (BookTrack)
+  behave as before.
+- `results.json` and the report record where the expected versionCode came
+  from (`versionCodeFrom`).
+- `release:promote` reads the versionCode of the APK it promotes: it must be
+  app.json's when the app pins one.
+
 ## [0.2.1] - 2026-10-12
 
 The night run of BookTrack 0.3.0 (8/8 smoke, 22/32 screenshots) lost two

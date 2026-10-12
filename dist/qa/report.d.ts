@@ -31,7 +31,10 @@ export interface QaRun {
     appName: string;
     androidPackage: string;
     version: string;
-    versionCode: number;
+    /** The expected versionCode; null only on a dry run that could not know it. */
+    versionCode: number | null;
+    /** Where the expected versionCode comes from ("app.json", "the APK", …); absent in runs before 0.2.2. */
+    versionCodeFrom?: string;
     installedVersionCode: number | null;
     apk: string;
     device: DeviceInfo;
