@@ -3,6 +3,33 @@
 All notable changes are listed here ([Keep a Changelog](https://keepachangelog.com/),
 [SemVer](https://semver.org/)).
 
+## [0.2.1] - 2026-10-12
+
+The night run of BookTrack 0.3.0 (8/8 smoke, 22/32 screenshots) lost two
+whole batches in a row after a cold restart: Maestro could not reach the
+emulator, and the report showed Maestro's Cloud box instead of the error.
+
+### Added
+- Maestro health check after every emulator boot (`maestro hierarchy`),
+  after Maestro processes left on the device are stopped. If it fails, mk
+  uninstalls Maestro's driver (`dev.mobile.maestro`,
+  `dev.mobile.maestro.test`), which Maestro reinstalls, and checks once
+  more. Both outcomes are in the report's notes.
+- Batch retry: when 2 or more screenshots of one batch fail, the whole
+  batch runs once more (on the emulator, after another cold restart)
+  before they are marked failed. A screenshot taken in the first attempt
+  is kept if the retry fails.
+- Each failed flow's Maestro debug folder (`~/.maestro/tests/<timestamp>`)
+  is copied into `<capture folder>/debug/<name>/` (screens:
+  `<screen>_<mode>_<lang>_<scale>x`, smoke flows: `smoke-<flow>`) and
+  linked from the report, with its `maestro.log`.
+
+### Fixed
+- The report shows the real error, the step that failed and its message
+  (e.g. `Tap on id: tab-shelves: Element not found: …`), not the last
+  lines of the output (Maestro's Cloud box, shown as "?" on Windows). The
+  full output, without the box, is under "Maestro output".
+
 ## [0.2.0] - 2026-10-11
 
 Fits a 16 GB PC: the first full emulator run (BookTrack 0.3.0) ran the host

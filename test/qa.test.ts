@@ -169,8 +169,44 @@ describe('mk qa:device with a fake device', () => {
     assert.deepEqual(settings(f), { night: 'no', font_scale: 'null', locales: '', versionCode: '16' });
     const html = fs.readFileSync(path.join(captureDir(f), 'report.html'), 'utf8');
     assert.ok(html.includes('Smoke: 1/2 passed'));
-    assert.ok(html.includes('Assertion is false: id: missing-thing is visible'));
     assert.ok(html.includes('No screenshot'));
+  });
+
+  it('shows the real error line and links a copy of each failed flow’s Maestro debug folder', () => {
+    const f = makeFixture();
+    const r = qa(f, [...apkArgs(f), '--yes', '--no-open'], { FAKE_FAIL: 'maestro:02-add,maestro:settings' });
+    assert.notEqual(r.status, 0);
+    assert.ok(r.out.includes('Tap on id: missing-thing: Element not found: Id matching regex: missing-thing'));
+    const dir = captureDir(f);
+    const html = fs.readFileSync(path.join(dir, 'report.html'), 'utf8');
+    const line = 'Flow failed: Tap on id: missing-thing: Element not found: Id matching regex: missing-thing';
+    assert.ok(html.includes(line));
+    assert.ok(!html.includes('maestro cloud'));
+    for (const name of ['smoke-02-add', 'settings_light_en_1.0x', 'settings_dark_en_1.0x']) {
+      assert.ok(fs.existsSync(path.join(dir, 'debug', name, 'maestro.log')), name);
+      assert.ok(fs.existsSync(path.join(dir, 'debug', name, name.startsWith('smoke') ? '02-add' : 'settings', 'screenshot-failed.png')), name);
+      assert.ok(html.includes(`href="debug/${name}/maestro.log"`), name);
+    }
+    const results = JSON.parse(fs.readFileSync(path.join(dir, 'results.json'), 'utf8'));
+    const shot = results.shots.find((s: { screen: string; mode: string }) => s.screen === 'settings' && s.mode === 'dark');
+    assert.equal(shot.error, line);
+    assert.equal(shot.debug, 'debug/settings_dark_en_1.0x');
+    // One failure per batch: no batch is retried.
+    assert.ok(!r.out.includes('retrying the whole batch'));
+  });
+
+  it('retries a whole batch once when 2+ of its screenshots fail, then marks them failed', () => {
+    const f = makeFixture();
+    const r = qa(f, [...apkArgs(f), '--yes', '--no-open'], { FAKE_FAIL: 'maestro:home,maestro:settings' });
+    assert.notEqual(r.status, 0);
+    assert.ok(r.out.includes('4 screenshot(s) missing'));
+    const screens = [...f.calls().matchAll(/^maestro .* test \S+screens[\\/](\w+)\.yaml/gm)].map((m) => m[1]);
+    // 2 batches × 2 attempts × (home, settings).
+    assert.deepEqual(screens, ['home', 'settings', 'home', 'settings', 'home', 'settings', 'home', 'settings']);
+    const html = fs.readFileSync(path.join(captureDir(f), 'report.html'), 'utf8');
+    assert.ok(html.includes('light · en · 1.0×: 2 of 2 screenshots failed: retrying the whole batch once'));
+    assert.ok(html.includes('dark · en · 1.0×: 2 of 2 screenshots failed: retrying the whole batch once'));
+    assert.ok(fs.existsSync(path.join(captureDir(f), 'logs', 'screen-home_dark_en_1.0x-batch-retry.log')));
   });
 
   it('restores the device when a setting change fails mid-matrix', () => {

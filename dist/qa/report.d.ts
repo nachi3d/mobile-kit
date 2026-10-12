@@ -3,8 +3,12 @@ export interface FlowResult {
     flow: string;
     ok: boolean;
     seconds: number;
-    /** Last lines of Maestro's output when it failed. */
+    /** Last lines of Maestro's output when it failed (its Cloud box removed). */
     error?: string;
+    /** The step that failed and why, e.g. "Tap on id: x: Element not found: …". */
+    errorLine?: string;
+    /** Copy of Maestro's debug folder, relative to the report. */
+    debug?: string;
 }
 export interface Shot {
     screen: string;
@@ -14,6 +18,8 @@ export interface Shot {
     /** Relative to the report; absent when the capture failed or did not run yet. */
     file?: string;
     error?: string;
+    /** Copy of Maestro's debug folder of the failed flow, relative to the report. */
+    debug?: string;
 }
 /** Device settings read before the matrix and put back after it. */
 export interface SavedSettings {

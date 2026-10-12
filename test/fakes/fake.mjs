@@ -28,12 +28,35 @@ function state() {
     anr: env.FAKE_ANR ?? '',
     memCalls: 0,
     boots: 0,
+    // Maestro's driver on the device: ok, broken (a reinstall fixes it) or dead (nothing does).
+    driver: 'ok',
   };
   if (!env.FAKE_STATE) return initial;
   if (!fs.existsSync(env.FAKE_STATE)) fs.writeFileSync(env.FAKE_STATE, JSON.stringify(initial));
   return JSON.parse(fs.readFileSync(env.FAKE_STATE, 'utf8'));
 }
 const save = (s) => env.FAKE_STATE && fs.writeFileSync(env.FAKE_STATE, JSON.stringify(s));
+
+/**
+ * What Maestro prints when a flow fails: the failed step, its error, the
+ * debug folder (created under FAKE_MAESTRO_TESTS), then the Maestro Cloud
+ * box whose frame a Windows console shows as "?".
+ */
+function failFlow(name, step, error) {
+  let debug = '';
+  if (env.FAKE_MAESTRO_TESTS) {
+    const n = fs.existsSync(env.FAKE_MAESTRO_TESTS) ? fs.readdirSync(env.FAKE_MAESTRO_TESTS).length : 0;
+    debug = `${env.FAKE_MAESTRO_TESTS}/2026-10-12_0037${String(n).padStart(2, '0')}`;
+    fs.mkdirSync(`${debug}/${name}`, { recursive: true });
+    fs.writeFileSync(`${debug}/maestro.log`, `[ERROR] ${error}\n`);
+    fs.writeFileSync(`${debug}/${name}/screenshot-failed.png`, PNG);
+  }
+  out(`Running on mk-pixel8-api34\n > Flow ${name}\nLaunch app "\${APP_ID}"... COMPLETED\n${step}... FAILED\n\n${error}\n\n`);
+  out('Possible causes:\n- Element selector may be incorrect.\n\n');
+  if (debug) out(`==== Debug output (logs & screenshots) ====\n\n${debug}\n`);
+  out(`${'?'.repeat(40)}\n?${' '.repeat(38)}?\n?   Run your flows on Maestro Cloud:   ?\n?   maestro cloud app_file flows_folder/ ?\n${'?'.repeat(40)}`);
+  process.exit(1);
+}
 
 switch (tool) {
   case 'eas':
@@ -48,6 +71,9 @@ switch (tool) {
     const s = state();
     s.emulator = args[args.indexOf('-avd') + 1];
     s.boots += 1;
+    // FAKE_DRIVER_BROKEN_BOOTS / FAKE_BAD_BOOTS="2,3": after those boots Maestro cannot reach the device.
+    const on = (name) => (env[name] ?? '').split(',').includes(String(s.boots));
+    s.driver = on('FAKE_BAD_BOOTS') ? 'dead' : on('FAKE_DRIVER_BROKEN_BOOTS') ? 'broken' : 'ok';
     save(s);
     break;
   }
@@ -105,6 +131,14 @@ switch (tool) {
     out(`Verifies\nSigner #1 certificate DN: CN=Expo\nSigner #1 certificate SHA-1 digest: ${env.FAKE_SHA1 ?? 'ab'.repeat(20)}\n`);
     break;
   case 'maestro': {
+    if (args.includes('hierarchy')) {
+      if (state().driver !== 'ok') {
+        process.stderr.write('Failed to connect to the device: io.grpc.StatusRuntimeException: UNAVAILABLE\n');
+        process.exit(1);
+      }
+      out('{ "attributes": { "resource-id": "" }, "children": [] }\n');
+      break;
+    }
     const flow = args[args.indexOf('test') + 1] ?? '';
     const name = flow.replace(/\\/g, '/').split('/').pop().replace(/\.ya?ml$/, '');
     // FAKE_MAESTRO_MS: each flow takes that long (a test kills mk meanwhile).
@@ -118,14 +152,9 @@ switch (tool) {
       s.anrShown = true;
       save(s);
     }
-    if (s.anr) {
-      out(`Running ${name}\nAssertion is false: an ANR dialog covers the app\n`);
-      process.exit(1);
-    }
-    if (failIf(`maestro:${name}`)) {
-      out(`Running ${name}\nAssertion is false: id: missing-thing is visible\n`);
-      process.exit(1);
-    }
+    if (s.anr) failFlow(name, 'Tap on id: tab-home', 'Element not found: an ANR dialog covers the app');
+    if (s.driver !== 'ok') failFlow(name, 'Launch app "${APP_ID}"', 'Unable to launch app com.example.app');
+    if (failIf(`maestro:${name}`)) failFlow(name, 'Tap on id: missing-thing', 'Element not found: Id matching regex: missing-thing');
     out(`Running ${name}\nFlow passed\n`);
     break;
   }
@@ -147,7 +176,10 @@ switch (tool) {
         save(s);
       }
     } else if (cmd === 'shell getprop sys.boot_completed') out('1\n');
-    else if (rest[0] === 'install') {
+    else if (rest[0] === 'uninstall') {
+      if (rest[1] === 'dev.mobile.maestro' && s.driver === 'broken') s.driver = 'ok';
+      save(s);
+    } else if (rest[0] === 'install') {
       s.versionCode = env.FAKE_APK_VC ?? '16';
       save(s);
     } else if (rest[0] === 'exec-out' && rest[1] === 'uiautomator') {

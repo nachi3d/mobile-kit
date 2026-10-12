@@ -11,12 +11,16 @@
 //   4. Maestro smoke flows (<maestroDir>/smoke/*.yaml, in name order);
 //   5. screenshots in batches of one device setting, captured with adb
 //      screencap. With --emulator, the emulator is cold-restarted before
-//      each batch, and mid-batch when host memory runs low;
+//      each batch, and mid-batch when host memory runs low; after each
+//      boot, a Maestro health check (`maestro hierarchy`), and one driver
+//      reinstall if it fails. A batch with 2+ failed screenshots runs
+//      once more (after a cold restart on the emulator);
 //   6. the device's night mode, font scale and app language are restored,
 //      also on failure or Ctrl+C;
 //   7. .images/captures/<date>-v<version>/ holds results.json and
 //      report.html, rewritten after every step: a killed run still leaves
-//      a report, and --resume <dir> continues it.
+//      a report, and --resume <dir> continues it. Each failed flow's
+//      Maestro debug folder is copied into debug/<name>/.
 //
 // --dry-run reads the device and prints every change, build, install and
 // flow instead of running it.
@@ -31,6 +35,7 @@ import { hostMemory, killLeftoverMaestro, memoryPressure } from '../host.js';
 import { detail, fail, info, KitError, warn } from '../log.js';
 import { openProject } from '../project.js';
 import { confirm } from '../prompt.js';
+import { parseMaestroOutput } from './maestro-output.js';
 import { buildPlan, settingLabel, shotKey, shotName } from './plan.js';
 import { renderReport, scaleLabel } from './report.js';
 export const QA_USAGE = 'Usage: mk qa:device [--apk <path>] [--skip-build] [--emulator] [--resume <dir>] [--keep-emulator] [--yes] [--no-open] [--dry-run]';
@@ -88,7 +93,25 @@ function outputDir(root, version) {
         dir = `${base}-${n}`;
     return dir;
 }
-function maestro(ctx, flowPath, env, logName) {
+/** Maestro's on-device driver: uninstalled, Maestro installs it again on its next run. */
+export const MAESTRO_DRIVER = ['dev.mobile.maestro', 'dev.mobile.maestro.test'];
+/** A copy of the debug folder Maestro printed, in <outDir>/debug/<name>/: its path relative to the report. */
+function keepDebug(ctx, from, name) {
+    if (!from || !fs.existsSync(from))
+        return undefined;
+    const to = path.join(ctx.outDir, 'debug', name);
+    try {
+        fs.rmSync(to, { recursive: true, force: true });
+        fs.cpSync(from, to, { recursive: true });
+        return `debug/${name}`;
+    }
+    catch (e) {
+        warn(`Could not copy Maestro's debug folder ${from}: ${e.message}`);
+        return undefined;
+    }
+}
+/** Runs a flow; a failure keeps the real error line and a copy of Maestro's debug folder (debug/<debugName>/). */
+function maestro(ctx, flowPath, env, logName, debugName = logName) {
     const args = ['--device', ctx.serial, 'test', flowPath, ...Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`])];
     const flow = path.relative(ctx.maestroDir, flowPath).replace(/\\/g, '/');
     if (ctx.p.dryRun) {
@@ -102,13 +125,26 @@ function maestro(ctx, flowPath, env, logName) {
     const output = `${r.stdout}\n${r.stderr}`.trim();
     fs.mkdirSync(ctx.logDir, { recursive: true });
     fs.writeFileSync(path.join(ctx.logDir, `${logName}.log`), output);
-    const ok = r.status === 0;
+    const seconds = (Date.now() - started) / 1000;
+    if (r.status === 0)
+        return { flow, ok: true, seconds };
+    const parsed = parseMaestroOutput(output);
+    const debug = keepDebug(ctx, parsed.debugDir, debugName);
     return {
         flow,
-        ok,
-        seconds: (Date.now() - started) / 1000,
-        ...(ok ? {} : { error: output.split('\n').slice(-25).join('\n') }),
+        ok: false,
+        seconds,
+        error: parsed.text.split('\n').slice(-25).join('\n'),
+        ...(parsed.errorLine ? { errorLine: parsed.errorLine } : {}),
+        ...(debug ? { debug } : {}),
     };
+}
+/** `maestro hierarchy` reads the screen through Maestro's driver: it fails when Maestro cannot reach the device. */
+function maestroReaches(ctx) {
+    const args = ['--device', ctx.serial, 'hierarchy'];
+    if (ctx.p.dryRun)
+        return act(true, ctx.p.tool.maestro, args).status === 0;
+    return run(ctx.p.tool.maestro, args, { cwd: ctx.outDir }).status === 0;
 }
 /** The run of an earlier invocation, from <dir>/results.json. */
 function loadRun(dir) {
@@ -306,6 +342,27 @@ export async function qaDevice(args) {
         shellAct(p.dryRun, p.tool.adb, ctx.serial, setFontScaleArgs(s.scale.toFixed(2).replace(/0$/, '')));
         setLanguage(s.lang);
     };
+    /**
+     * After a boot (ensureEmulator waited for it and unlocked the screen),
+     * Maestro must reach the device: after one cold restart its driver was
+     * broken for two whole batches. If `maestro hierarchy` fails, the driver
+     * is uninstalled (Maestro installs it again) and the check runs once more.
+     */
+    const healthCheck = () => {
+        const left = killLeftoverMaestro(p, ctx.serial);
+        if (left)
+            note(`Stopped ${left} Maestro process(es) still running on ${ctx.serial} after the boot`);
+        info('Maestro health check (maestro hierarchy)');
+        if (maestroReaches(ctx))
+            return;
+        note(`Maestro could not reach ${ctx.serial} after the boot: reinstalling its driver (${MAESTRO_DRIVER.join(', ')})`);
+        for (const pkg of MAESTRO_DRIVER)
+            act(p.dryRun, p.tool.adb, ['-s', ctx.serial, 'uninstall', pkg]);
+        if (maestroReaches(ctx))
+            info('Maestro reaches the device again');
+        else
+            note(`Maestro still cannot reach ${ctx.serial} after reinstalling its driver`);
+    };
     /** Emulator only: a cold boot frees the host memory the emulator kept. */
     const restartEmulator = async (why) => {
         info(`Restarting the emulator cold (${why})`);
@@ -313,6 +370,75 @@ export async function qaDevice(args) {
         ctx.serial = ready.serial;
         ownsEmulator = true;
         freshBoot = true;
+        healthCheck();
+    };
+    /** Captures `names` with the batch's setting applied; returns how many failed in this attempt. */
+    const captureBatch = async (batch, names, attempt) => {
+        let failed = 0;
+        for (const [j, screen] of names.entries()) {
+            await checkpoint();
+            anrCheck();
+            const name = shotName(screen, batch);
+            const shot = shots.find((s) => shotKey(s.screen, s) === shotKey(screen, batch));
+            if (!shot)
+                throw new KitError(`Internal: ${name} is not in the plan`);
+            delete shot.error;
+            delete shot.debug;
+            const flow = screenFiles.get(screen) ?? '';
+            const logName = attempt === 1 ? `screen-${name}` : `screen-${name}-batch-retry`;
+            let r = maestro(ctx, flow, { APP_ID: config.androidPackage }, logName, name);
+            freshBoot = false;
+            // A screen flow only opens a screen: run it again if another app's
+            // "isn't responding" dialog was covering it.
+            if (!r.ok && !p.dryRun) {
+                const n = dismissForeignAnr(false, p.tool.adb, ctx.serial, config.androidPackage);
+                if (n?.endsWith('tapped Wait')) {
+                    note(`${n} during ${name}: ran it again`);
+                    r = maestro(ctx, flow, { APP_ID: config.androidPackage }, `${logName}-retry`, name);
+                }
+            }
+            if (p.dryRun) {
+                detail(`[dry run, not executed] adb -s ${ctx.serial} exec-out screencap -p > ${name}.png`);
+            }
+            else if (!r.ok) {
+                failed++;
+                // A retry that fails keeps the screenshot the first attempt took.
+                if (!shot.file) {
+                    shot.error = `Flow failed: ${r.errorLine ?? 'see the log'}`;
+                    if (r.debug)
+                        shot.debug = r.debug;
+                }
+            }
+            else {
+                const png = screencap(p.tool.adb, ctx.serial);
+                if (png) {
+                    fs.writeFileSync(path.join(outDir, `${name}.png`), png);
+                    shot.file = `${name}.png`;
+                }
+                else if (!shot.file) {
+                    failed++;
+                    shot.error = 'adb screencap returned no PNG';
+                }
+                else
+                    failed++;
+            }
+            persist();
+            if (!p.dryRun) {
+                const status = r.ok && shot.file ? 'OK  ' : 'MISS';
+                detail(`${status} ${screen} · ${batch.mode} · ${batch.lang} · ${scaleLabel(batch.scale)}${r.ok ? '' : `: ${r.errorLine ?? ''}`}`);
+            }
+            // Watchdog: the capture is done; restart before the next one if memory is short.
+            if (o.emulator && !p.dryRun && j < names.length - 1) {
+                const m = hostMemory(p);
+                const why = m && memoryPressure(m, config.emulator);
+                if (why) {
+                    note(`Memory: ${why}: restarted the emulator before ${names[j + 1]} (${settingLabel(batch)})`);
+                    await restartEmulator(why);
+                    applySetting(batch);
+                }
+            }
+        }
+        return failed;
     };
     const onSignal = () => {
         interrupted = true;
@@ -323,6 +449,8 @@ export async function qaDevice(args) {
         process.on(s, onSignal);
     let stopError = null;
     try {
+        if (o.emulator && ownsEmulator)
+            healthCheck();
         // Smoke.
         if (smokeToRun.length)
             info(`Maestro smoke flows (${smokeToRun.length}${smokeDone.size ? `, ${smokeDone.size} done earlier` : ''})`);
@@ -331,6 +459,8 @@ export async function qaDevice(args) {
             anrCheck();
             detail(`${path.basename(file)} …`);
             const r = maestro(ctx, file, { APP_ID: config.androidPackage }, `smoke-${path.basename(file, path.extname(file))}`);
+            if (!r.ok && r.errorLine)
+                detail(r.errorLine);
             freshBoot = false;
             run_.smoke.push(r);
             persist();
@@ -346,58 +476,18 @@ export async function qaDevice(args) {
         for (const [i, batch] of todo.entries()) {
             await checkpoint();
             info(`Batch ${i + 1}/${todo.length}: ${settingLabel(batch)}`);
-            if (o.emulator && !freshBoot)
-                await restartEmulator('one batch per boot');
-            applySetting(batch);
             const names = pending(batch);
-            for (const [j, screen] of names.entries()) {
-                await checkpoint();
-                anrCheck();
-                const name = shotName(screen, batch);
-                const shot = shots.find((s) => shotKey(s.screen, s) === shotKey(screen, batch));
-                if (!shot)
-                    throw new KitError(`Internal: ${name} is not in the plan`);
-                delete shot.error;
-                const flow = screenFiles.get(screen) ?? '';
-                let r = maestro(ctx, flow, { APP_ID: config.androidPackage }, `screen-${name}`);
-                freshBoot = false;
-                // A screen flow only opens a screen: run it again if another app's
-                // "isn't responding" dialog was covering it.
-                if (!r.ok && !p.dryRun) {
-                    const n = dismissForeignAnr(false, p.tool.adb, ctx.serial, config.androidPackage);
-                    if (n?.endsWith('tapped Wait')) {
-                        note(`${n} during ${name}: ran it again`);
-                        r = maestro(ctx, flow, { APP_ID: config.androidPackage }, `screen-${name}-retry`);
-                    }
-                }
-                if (p.dryRun) {
-                    detail(`[dry run, not executed] adb -s ${ctx.serial} exec-out screencap -p > ${name}.png`);
-                }
-                else if (!r.ok) {
-                    shot.error = `Flow failed: ${r.error?.split('\n').slice(-3).join(' ') ?? ''}`;
-                }
-                else {
-                    const png = screencap(p.tool.adb, ctx.serial);
-                    if (png) {
-                        fs.writeFileSync(path.join(outDir, `${name}.png`), png);
-                        shot.file = `${name}.png`;
-                    }
-                    else
-                        shot.error = 'adb screencap returned no PNG';
-                }
-                persist();
-                if (!p.dryRun)
-                    detail(`${shot.file ? 'OK  ' : 'MISS'} ${screen} · ${batch.mode} · ${batch.lang} · ${scaleLabel(batch.scale)}`);
-                // Watchdog: the capture is done; restart before the next one if memory is short.
-                if (o.emulator && !p.dryRun && j < names.length - 1) {
-                    const m = hostMemory(p);
-                    const why = m && memoryPressure(m, config.emulator);
-                    if (why) {
-                        note(`Memory: ${why}: restarted the emulator before ${names[j + 1]} (${settingLabel(batch)})`);
-                        await restartEmulator(why);
-                        applySetting(batch);
-                    }
-                }
+            for (let attempt = 1;; attempt++) {
+                if (o.emulator && !freshBoot)
+                    await restartEmulator(attempt === 1 ? 'one batch per boot' : 'before retrying the batch');
+                applySetting(batch);
+                const failed = await captureBatch(batch, names, attempt);
+                // Two or more failures in one batch point at the device (Maestro
+                // lost it), not at the screens: one more go, on a fresh boot.
+                if (p.dryRun || failed < 2 || attempt === 2)
+                    break;
+                note(`${settingLabel(batch)}: ${failed} of ${names.length} screenshots failed: ` +
+                    `retrying the whole batch once${o.emulator ? ' after a cold restart' : ''}`);
             }
         }
     }
