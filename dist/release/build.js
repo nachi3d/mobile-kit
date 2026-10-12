@@ -5,6 +5,11 @@
 // connected phone. latest.apk is untouched: that is release:promote, after
 // the phone check.
 //
+// The expected versionCode is app.json's when the app pins it there; when
+// EAS numbers the builds (no versionCode in app.json, or eas.json
+// `appVersionSource: "remote"`), it is the one EAS gave this build
+// (`appBuildVersion`), and the APK must carry it.
+//
 // --dry-run runs every check but only PRINTS the EAS build, the upload and
 // the install. With an APK already in dist/, it is verified.
 import fs from 'node:fs';
@@ -37,12 +42,13 @@ export async function releaseBuild(args, dryRun) {
     }
     if (head.status !== '404')
         fail(`Cannot check ${t.versionedUrl} (HTTP status '${head.status}'). Network?`);
-    info(`Preconditions OK: v${version}, versionCode ${t.versionCode}, clean tree, ${t.versionedKey} is free`);
+    const vcLabel = t.versionCode !== null ? `versionCode ${t.versionCode}` : 'versionCode from EAS (remote)';
+    info(`Preconditions OK: v${version}, ${vcLabel}, clean tree, ${t.versionedKey} is free`);
     // --- Build and download ----------------------------------------------------
     const built = easBuild(p, p.config.easProfiles.release, t.apkPath);
     const rel = path.relative(p.root, t.apkPath).replace(/\\/g, '/');
     let verify = true;
-    if (!built) {
+    if (!built.downloaded) {
         if (fs.existsSync(t.apkPath))
             info(`Dry run: verifying the APK already in ${rel}`);
         else {
@@ -51,10 +57,21 @@ export async function releaseBuild(args, dryRun) {
         }
     }
     // --- Verify ----------------------------------------------------------------
+    // app.json's versionCode, else EAS's for this build; on a dry run of a
+    // remote app, nothing was built: the APK's own is reported.
+    const expected = t.versionCode ?? built.appBuildVersion;
+    const expectedFrom = t.versionCode !== null ? 'app.json' : 'the EAS build';
+    let versionCode = expected;
     if (verify) {
-        verifyApk(t.apkPath, { androidPackage: p.config.androidPackage, version, versionCode: t.versionCode, sha1: t.sha1 }, p.tool.aapt, p.tool.apksigner);
+        const expect = { androidPackage: p.config.androidPackage, version, versionCode: expected, versionCodeFrom: expectedFrom, sha1: t.sha1 };
+        const apkVc = verifyApk(t.apkPath, expect, p.tool.aapt, p.tool.apksigner);
+        versionCode = apkVc ?? expected;
         info(`${rel}: ${fileSize(t.apkPath)} bytes, sha256 ${sha256(t.apkPath)}`);
     }
+    if (versionCode === null && !p.dryRun) {
+        fail('Cannot tell the versionCode of this build: EAS gave none and aapt2 is missing. Install the Android build-tools.');
+    }
+    const vcText = versionCode ?? 'unknown on a dry run';
     // --- Upload (versioned key only) -------------------------------------------
     if (!p.dryRun && originHead(p.tool.curl, t.versionedUrl).status !== '404') {
         fail(`${t.versionedKey} appeared on R2 during the build. Not overwritten.`);
@@ -74,13 +91,13 @@ export async function releaseBuild(args, dryRun) {
         if (act(p.dryRun, p.tool.adb, ['-s', serial, 'install', '-r', t.apkPath]).status !== 0)
             fail('adb install failed');
         const installed = installedVersionCode(p.tool.adb, serial, p.config.androidPackage);
-        info(`Installed versionCode on ${serial}: ${installed ?? 'none'} (expected ${t.versionCode})`);
+        info(`Installed versionCode on ${serial}: ${installed ?? 'none'} (expected ${vcText})`);
     }
     else {
         info(`${ready.length} phone(s) connected by adb: install by hand.`);
         detail(`Copy ${rel} to the phone (or open ${t.versionedUrl} there),`);
         detail('install it OVER the current app (never uninstall), then check');
-        detail(`the version in the app: ${version} (${t.versionCode}).`);
+        detail(`the version in the app: ${version} (${vcText}).`);
     }
     console.log();
     info('Test this build on the phone, then run release:promote');

@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { fileSize, isApk } from '../apk.js';
+import { fileSize, isApk, readBadging } from '../apk.js';
 import { act, run } from '../exec.js';
 import { httpHead, originHead } from '../http.js';
 import { detail, fail, info } from '../log.js';
@@ -32,6 +32,13 @@ export async function releasePromote(args: string[], dryRun: boolean): Promise<v
   if (!env.cfPurgeToken) fail('CF_PURGE_TOKEN is missing in .env.local');
   if (!isApk(t.apkPath)) fail(`No APK at ${rel} (run release:build first)`);
   const localSize = String(fileSize(t.apkPath));
+  // The APK's own versionCode (aapt2); it must be app.json's when the app
+  // pins one. With EAS numbering, release:build already checked it.
+  const apk = readBadging(t.apkPath, p.tool.aapt);
+  if (apk && t.versionCode !== null && apk.versionCode !== t.versionCode) {
+    fail(`${rel} has versionCode ${apk.versionCode}, app.json says ${t.versionCode}. Not the build of ${version}.`);
+  }
+  if (apk) info(`${rel}: versionCode ${apk.versionCode}${t.versionCode === null ? ' (from EAS)' : ''}`);
 
   const head = originHead(p.tool.curl, t.versionedUrl);
   if (head.status !== '200') fail(`${t.versionedKey} is not on R2 (HTTP '${head.status}'). Run release:build first.`);
