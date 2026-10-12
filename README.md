@@ -62,6 +62,18 @@ On the one connected phone or emulator:
      `emulator.minFreeMb` (2048), or the emulator process uses more than
      `emulator.maxEmulatorMb` (6144), it restarts the emulator, puts the
      batch's settings back and goes on with the next screen.
+   - **Maestro health check after every boot.** Once the emulator has
+     booted and is unlocked, mk stops Maestro processes left on it and
+     runs `maestro hierarchy`. If that fails, it uninstalls Maestro's
+     driver (`dev.mobile.maestro` and `dev.mobile.maestro.test`; Maestro
+     reinstalls it on its next run) and checks once more. The report's
+     notes say what happened.
+
+   **Batch retry.** If 2 or more screenshots of one batch fail, the whole
+   batch runs once more (with `--emulator`, after another cold restart)
+   before they are marked failed. That many failures at once mean
+   Maestro lost the device, not that the screens are broken. A screenshot
+   the first attempt took is kept if the retry fails.
 9. **"Isn't responding" dialogs.** Before each flow, mk looks for another
    app's ANR dialog (e.g. "Pixel Launcher isn't responding" after a cold
    boot) and taps its **Wait** button. A screen flow that failed because
@@ -78,6 +90,12 @@ On the one connected phone or emulator:
     - The page has a gallery grouped by screen with mode/language/scale
       labels and filters, the Maestro results, the notes (restarts,
       dialogs), and the device model, Android version and versionCode.
+    - **Failures.** Each failed flow shows the step that failed and its
+      error (e.g. `Tap on id: tab-shelves: Element not found: …`), not
+      Maestro's Cloud box. Its Maestro debug folder
+      (`~/.maestro/tests/<timestamp>`: `maestro.log`, screenshots) is
+      copied into `debug/<screen>_<mode>_<lang>_<scale>x/` (smoke flows:
+      `debug/smoke-<flow>/`) and linked from the report.
 12. **Clean exit.** Maestro processes still running are stopped. If mk
     started or restarted the emulator, it stops it (`--keep-emulator`
     leaves it running). Maestro runs in the capture folder, so JVM crash

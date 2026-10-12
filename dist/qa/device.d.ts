@@ -12,4 +12,6 @@ export interface QaOptions {
     dryRun: boolean;
 }
 export declare function parseQaArgs(args: string[]): QaOptions;
+/** Maestro's on-device driver: uninstalled, Maestro installs it again on its next run. */
+export declare const MAESTRO_DRIVER: string[];
 export declare function qaDevice(args: string[]): Promise<void>;

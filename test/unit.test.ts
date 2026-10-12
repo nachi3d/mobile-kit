@@ -5,6 +5,7 @@ import { waitButtonCentre } from '../dist/android.js';
 import { loadConfig, normalizeSha1, validateConfig } from '../dist/config.js';
 import { parseCommand } from '../dist/exec.js';
 import { memoryPressure } from '../dist/host.js';
+import { parseMaestroOutput } from '../dist/qa/maestro-output.js';
 import { buildPlan } from '../dist/qa/plan.js';
 import { renderReport, type QaRun } from '../dist/qa/report.js';
 import { makeFixture } from './fixture.ts';
@@ -175,5 +176,52 @@ describe('report', () => {
     assert.ok(html.includes('mk qa:device --resume /caps/2026-10-11-v1.0.0'));
     assert.ok(html.includes('Screenshots: 1/2'));
     assert.ok(!renderReport({ ...run, finishedAt: 'b', shots: [run.shots[0]!] }).includes('Incomplete run'));
+  });
+});
+
+describe('Maestro output', () => {
+  // Shape of a real failure (BookTrack night run 2026-10-11-v0.3.0-2), the
+  // Cloud box's frame turned into "?" by the Windows console.
+  const NIGHT_RUN = [
+    'Running on mk-pixel8-api34',
+    ' > Flow shelf',
+    'Launch app "${APP_ID}"... COMPLETED',
+    'Tap on id: tab-shelves... FAILED',
+    '',
+    'Element not found: Id matching regex: tab-shelves',
+    '',
+    'Possible causes:',
+    '- Element may be temporarily unavailable due to loading state.',
+    '',
+    '==== Debug output (logs & screenshots) ====',
+    '',
+    'C:\\Users\\seana\\.maestro\\tests\\2026-10-12_003711',
+    '??????????????????????????????????????',
+    '?                                    ?',
+    '?   Run your flows on Maestro Cloud: ?',
+    '?   maestro cloud app_file flows_folder/                       ?',
+    '??????????????????????????????????????',
+  ].join('\r\n');
+
+  it('keeps the failed step and its error, the debug folder, and drops the Cloud box', () => {
+    const r = parseMaestroOutput(NIGHT_RUN);
+    assert.equal(r.errorLine, 'Tap on id: tab-shelves: Element not found: Id matching regex: tab-shelves');
+    assert.equal(r.debugDir, 'C:\\Users\\seana\\.maestro\\tests\\2026-10-12_003711');
+    assert.ok(!r.text.includes('maestro cloud'));
+    assert.ok(!r.text.includes('Debug output'));
+    assert.ok(r.text.endsWith('loading state.'));
+  });
+
+  it('drops a box drawn with real frame characters too', () => {
+    const r = parseMaestroOutput('Assert visible... FAILED\nNot visible\n╭──────╮\n│ Cloud │\n╰──────╯\n');
+    assert.equal(r.errorLine, 'Assert visible: Not visible');
+    assert.equal(r.text, 'Assert visible... FAILED\nNot visible');
+    assert.equal(r.debugDir, null);
+  });
+
+  it('without a FAILED step, the last line is the error', () => {
+    const r = parseMaestroOutput('Device emulator-5554 not found\n\n');
+    assert.equal(r.errorLine, 'Device emulator-5554 not found');
+    assert.equal(parseMaestroOutput('').errorLine, null);
   });
 });

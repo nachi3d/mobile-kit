@@ -186,7 +186,66 @@ describe('mk qa:device --emulator', () => {
     assert.equal(r.status, 0, r.out);
     assert.match(r.out, /not executed\].*emulator -avd mk-pixel8-api34/);
     assert.match(r.out, /maestro --device emulator-5554 test/);
+    assert.match(r.out, /not executed\].*maestro --device emulator-5554 hierarchy/);
     assert.deepEqual(sideEffects(f.calls()), []);
+  });
+});
+
+describe('mk qa:device --emulator: Maestro health check and batch retry', () => {
+  const apkOf = (f: { root: string }) => path.join(f.root, 'dist', 'ExampleApp-0.2.0.apk');
+  const reportOf = (f: { root: string }) => {
+    const base = path.join(f.root, '.images', 'captures');
+    return fs.readFileSync(path.join(base, fs.readdirSync(base)[0]!, 'report.html'), 'utf8');
+  };
+  const count = (text: string, re: RegExp) => [...text.matchAll(re)].length;
+
+  it('checks that Maestro reaches the emulator after every boot', () => {
+    const f = makeFixture();
+    const r = f.run(['qa:device', '--emulator', '--apk', apkOf(f), '--yes', '--no-open']);
+    assert.equal(r.status, 0, r.out);
+    // First boot + one cold restart per batch (2), each checked once.
+    assert.equal(count(f.calls(), /^emulator /gm), 3);
+    assert.equal(count(f.calls(), /^maestro --device emulator-5554 hierarchy$/gm), 3);
+    assert.equal(count(f.calls(), /^procs kill-maestro emulator-5554$/gm), 3 + 2);
+    assert.doesNotMatch(f.calls(), / uninstall /);
+  });
+
+  it('reinstalls the Maestro driver when the check fails after a cold restart, then goes on', () => {
+    const f = makeFixture();
+    const r = f.run(['qa:device', '--emulator', '--apk', apkOf(f), '--yes', '--no-open'], { FAKE_DRIVER_BROKEN_BOOTS: '2' });
+    assert.equal(r.status, 0, r.out);
+    const calls = f.calls();
+    assert.match(calls, /^adb -s emulator-5554 uninstall dev\.mobile\.maestro$/m);
+    assert.match(calls, /^adb -s emulator-5554 uninstall dev\.mobile\.maestro\.test$/m);
+    assert.equal(count(calls, /^maestro --device emulator-5554 hierarchy$/gm), 4);
+    const html = reportOf(f);
+    assert.ok(html.includes('Maestro could not reach emulator-5554 after the boot: reinstalling its driver'));
+    assert.ok(!html.includes('still cannot reach'));
+    assert.ok(html.includes('Screenshots: 4/4'));
+  });
+
+  it('a batch lost to a broken boot is retried once after another cold restart', () => {
+    const f = makeFixture();
+    const r = f.run(['qa:device', '--emulator', '--apk', apkOf(f), '--yes', '--no-open'], { FAKE_BAD_BOOTS: '2' });
+    assert.equal(r.status, 0, r.out);
+    // First boot, batch 1 (broken), its retry, batch 2.
+    assert.equal(count(f.calls(), /^emulator /gm), 4);
+    const html = reportOf(f);
+    assert.ok(html.includes('Maestro still cannot reach emulator-5554 after reinstalling its driver'));
+    assert.ok(html.includes('light · en · 1.0×: 2 of 2 screenshots failed: retrying the whole batch once after a cold restart'));
+    assert.ok(html.includes('Screenshots: 4/4'));
+    assert.ok(!html.includes('No screenshot'));
+  });
+
+  it('two broken boots in a row: the batch is retried only once, then marked failed', () => {
+    const f = makeFixture();
+    const r = f.run(['qa:device', '--emulator', '--apk', apkOf(f), '--yes', '--no-open'], { FAKE_BAD_BOOTS: '2,3' });
+    assert.notEqual(r.status, 0);
+    assert.ok(r.out.includes('2 screenshot(s) missing'));
+    const html = reportOf(f);
+    assert.ok(html.includes('Flow failed: Launch app &quot;${APP_ID}&quot;: Unable to launch app com.example.app'));
+    assert.equal(count(html, /retrying the whole batch/g), 1);
+    assert.ok(html.includes('Screenshots: 2/4'));
   });
 });
 

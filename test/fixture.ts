@@ -116,6 +116,7 @@ export function makeFixture(
     ANDROID_AVD_HOME: avdHome,
     FAKE_LOG: log,
     FAKE_STATE: stateFile,
+    FAKE_MAESTRO_TESTS: path.join(base, 'maestro-tests'),
     FAKE_PKG: 'com.example.app',
     FAKE_VC: '16',
     ...env, // an undefined value removes the variable
@@ -153,7 +154,7 @@ export function sideEffects(calls: string): string[] {
         /^open /.test(l) ||
         /^(emulator|avdmanager) /.test(l) ||
         /^procs kill/.test(l) ||
-        /^adb .*( install | exec-out |emu kill|settings put global|dismiss-keyguard)/.test(l) ||
+        /^adb .*( install | uninstall | exec-out |emu kill|settings put global|dismiss-keyguard)/.test(l) ||
         /^adb .*(uimode night \S|settings (put|delete)|set-app-locales)/.test(l) ||
         /^curl .*(-X POST|-o )/.test(l),
     );

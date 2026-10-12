@@ -4,8 +4,12 @@ export interface FlowResult {
   flow: string;
   ok: boolean;
   seconds: number;
-  /** Last lines of Maestro's output when it failed. */
+  /** Last lines of Maestro's output when it failed (its Cloud box removed). */
   error?: string;
+  /** The step that failed and why, e.g. "Tap on id: x: Element not found: …". */
+  errorLine?: string;
+  /** Copy of Maestro's debug folder, relative to the report. */
+  debug?: string;
 }
 
 export interface Shot {
@@ -16,6 +20,8 @@ export interface Shot {
   /** Relative to the report; absent when the capture failed or did not run yet. */
   file?: string;
   error?: string;
+  /** Copy of Maestro's debug folder of the failed flow, relative to the report. */
+  debug?: string;
 }
 
 /** Device settings read before the matrix and put back after it. */
@@ -51,6 +57,12 @@ export interface QaRun {
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
+/** Links to the copy of Maestro's debug folder (its log and screenshots). */
+const debugLinks = (dir?: string) =>
+  dir
+    ? `<small class="debug"><a href="${esc(dir)}/" target="_blank">debug folder</a> · <a href="${esc(dir)}/maestro.log" target="_blank">maestro.log</a></small>`
+    : '';
+
 export const scaleLabel = (scale: number) => `${scale.toFixed(1)}×`;
 
 /** The QA gallery: one self-contained page next to the PNGs. */
@@ -65,7 +77,8 @@ export function renderReport(r: QaRun): string {
   const smokeRows = r.smoke
     .map(
       (f) => `<tr class="${f.ok ? 'pass' : 'fail'}"><td>${f.ok ? 'PASS' : 'FAIL'}</td><td>${esc(f.flow)}</td>` +
-        `<td>${f.seconds.toFixed(1)} s</td><td>${f.error ? `<pre>${esc(f.error)}</pre>` : ''}</td></tr>`,
+        `<td>${f.seconds.toFixed(1)} s</td><td>${f.errorLine ? `<b>${esc(f.errorLine)}</b>` : ''}${debugLinks(f.debug)}` +
+        `${f.error ? `<details><summary>Maestro output</summary><pre>${esc(f.error)}</pre></details>` : ''}</td></tr>`,
     )
     .join('\n');
 
@@ -83,7 +96,7 @@ export function renderReport(r: QaRun): string {
           const body = s.file
             ? `<a href="${esc(s.file)}" target="_blank"><img src="${esc(s.file)}" alt="${esc(`${screen} ${label}`)}" loading="lazy"></a>`
             : s.error
-              ? `<div class="missing">No screenshot<br><small>${esc(s.error)}</small></div>`
+              ? `<div class="missing">No screenshot<br><small>${esc(s.error)}</small>${debugLinks(s.debug)}</div>`
               : '<div class="missing pending">Not captured<br><small>the run stopped before it</small></div>';
           return `<figure data-mode="${esc(s.mode)}" data-lang="${esc(s.lang)}" data-scale="${esc(scaleLabel(s.scale))}">${body}<figcaption>${esc(label)}</figcaption></figure>`;
         })
@@ -124,6 +137,8 @@ figcaption { text-align: center; color: var(--muted); padding-top: 4px; font-siz
 .missing.pending { color: var(--muted); }
 .missing { aspect-ratio: 9 / 19; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--fail); padding: 8px; }
 ul.notes { color: var(--muted); }
+small.debug { display: block; margin-top: 4px; } a { color: inherit; }
+details summary { cursor: pointer; color: var(--muted); }
 </style>
 </head>
 <body>
