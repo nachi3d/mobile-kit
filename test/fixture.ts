@@ -16,6 +16,18 @@ export const SHA1 = 'ab'.repeat(20);
 export const SHA1_COLONS = SHA1.toUpperCase().match(/../g)!.join(':');
 export const TOKEN = 'SECRET-PURGE-TOKEN-123';
 export const APK_BYTES = 'PK\x03\x04....AndroidManifest.xml....';
+/** The fake keystore's passwords: they must never appear in a command line or mk's output. */
+export const STORE_PASSWORD = 'store-secret-4242';
+export const KEY_PASSWORD = 'key-secret-4242';
+/** eas.json of the fixture when a test asks for one: like BookTrack's (env per profile, extends). */
+export const EAS_JSON = {
+  cli: { version: '>= 16.0.0', appVersionSource: 'local' },
+  build: {
+    preview: { distribution: 'internal', android: { buildType: 'apk' }, env: { APP_ABIS: 'arm64-v8a,x86_64' } },
+    production: { android: { buildType: 'apk' }, env: { APP_ABIS: 'arm64-v8a', SENTRY: 'off' } },
+    universal: { extends: 'production', env: { APP_ABIS: 'all' } },
+  },
+};
 
 export const BASE_CONFIG = {
   appName: 'ExampleApp',
@@ -37,6 +49,8 @@ export interface Result {
 export interface Fixture {
   root: string;
   avdHome: string;
+  /** The production keystore folder (outside the fixture repo); MK_KEYSTORE_DIR points at it. */
+  keystoreDir: string;
   run(args: string[], env?: Record<string, string | undefined>, input?: string): Result;
   /** mk running in the background (a test kills it). */
   start(args: string[], env?: Record<string, string | undefined>): ChildProcess;
@@ -62,6 +76,8 @@ export function makeFixture(
     versionCode?: number | null;
     /** eas.json content; none by default. */
     easJson?: Record<string, unknown>;
+    /** Put the production keystore in keystoreDir (default true). */
+    keystore?: boolean;
   } = {},
 ): Fixture {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mk-test-'));
@@ -70,6 +86,13 @@ export function makeFixture(
   const stateFile = path.join(base, 'device.json');
   const avdHome = path.join(base, 'avd');
   fs.mkdirSync(avdHome);
+  const keystoreDir = path.join(base, 'secrets', 'exampleapp');
+  if (options.keystore ?? true) {
+    fs.mkdirSync(keystoreDir, { recursive: true });
+    fs.writeFileSync(path.join(keystoreDir, 'keystore.jks'), 'fake keystore');
+    const keystore = { keystorePath: 'keystore.jks', keystorePassword: STORE_PASSWORD, keyAlias: 'upload', keyPassword: KEY_PASSWORD };
+    fs.writeFileSync(path.join(keystoreDir, 'credentials.json'), JSON.stringify({ android: { keystore } }));
+  }
   const write = (file: string, content: string) => {
     fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
     fs.writeFileSync(path.join(root, file), content);
@@ -81,7 +104,8 @@ export function makeFixture(
   write('app.json', JSON.stringify({ expo: { version: '0.2.0', android } }));
   if (options.easJson) write('eas.json', JSON.stringify(options.easJson, null, 2));
   write('mobile-kit.config.json', JSON.stringify({ ...BASE_CONFIG, ...options.config }, null, 2));
-  write('.gitignore', 'dist/\n*.apk\n.env.local\n.images/\n');
+  write('.gitignore', 'dist/\n*.apk\n.env.local\n.images/\n/android\ncredentials.json\n*.jks\n');
+  write('package.json', `${JSON.stringify({ name: 'example-app', scripts: { android: 'expo start --android' } }, null, 2)}\n`);
   const smoke = options.smoke ?? {
     '01-onboarding.yaml': 'appId: ${APP_ID}\n---\n- launchApp:\n    clearState: true\n',
     '02-add.yaml': 'appId: ${APP_ID}\n---\n- launchApp\n',
@@ -117,6 +141,11 @@ export function makeFixture(
     MK_EMULATOR: fake('emulator'),
     MK_AVDMANAGER: fake('avdmanager'),
     MK_PROCS: fake('procs'),
+    MK_EXPO: fake('expo'),
+    MK_GRADLEW: fake('gradlew'),
+    MK_KEYTOOL: fake('keytool'),
+    MK_KEYSTORE_DIR: keystoreDir,
+    FAKE_STOREPASS: STORE_PASSWORD,
     MK_POLL_MS: '20',
     MK_SETTLE_MS: '0',
     MK_STOP_TIMEOUT_MS: '500',
@@ -131,6 +160,7 @@ export function makeFixture(
   return {
     root,
     avdHome,
+    keystoreDir,
     write,
     run(args, env = {}, input = '') {
       const r = spawnSync(process.execPath, [CLI, ...args], { cwd: root, encoding: 'utf8', input, env: mkEnv(env) });
@@ -161,6 +191,8 @@ export function sideEffects(calls: string): string[] {
         /^open /.test(l) ||
         /^(emulator|avdmanager) /.test(l) ||
         /^procs kill/.test(l) ||
+        /^(expo|gradlew) /.test(l) ||
+        /^eas credentials/.test(l) ||
         /^adb .*( install | uninstall | exec-out |emu kill|settings put global|dismiss-keyguard)/.test(l) ||
         /^adb .*(uimode night \S|settings (put|delete)|set-app-locales)/.test(l) ||
         /^curl .*(-X POST|-o )/.test(l),

@@ -12,6 +12,9 @@
 //   MK_EMULATOR   default emulator of the Android SDK
 //   MK_AVDMANAGER default avdmanager of the SDK's cmdline-tools/latest
 //   MK_PROCS      default `node dist/procs.js` (host memory, leftover processes)
+//   MK_EXPO       default "npx expo" (local builds: expo prebuild)
+//   MK_GRADLEW    default the app's android/gradlew (local builds)
+//   MK_KEYTOOL    default keytool of JAVA_HOME, else "keytool"
 //
 // A value is split on whitespace, or is a JSON array of strings when it
 // starts with "[" (for paths with spaces). An empty value means "missing"
@@ -23,7 +26,10 @@ import { fileURLToPath } from 'node:url';
 
 import { detail } from './log.js';
 
-export const TOOLS = ['eas', 'wrangler', 'curl', 'adb', 'maestro', 'aapt', 'apksigner', 'open', 'emulator', 'avdmanager', 'procs'] as const;
+export const TOOLS = [
+  'eas', 'wrangler', 'curl', 'adb', 'maestro', 'aapt', 'apksigner', 'open', 'emulator', 'avdmanager', 'procs',
+  'expo', 'gradlew', 'keytool',
+] as const;
 export type ToolName = (typeof TOOLS)[number];
 
 export const toolEnv = (tool: ToolName) => `MK_${tool.toUpperCase()}`;
@@ -94,6 +100,16 @@ function defaultCommand(tool: ToolName): string[] {
       const f = findSdkTool('cmdline-tools', 'latest', 'bin', 'avdmanager');
       return f ? [f] : ['avdmanager'];
     }
+    case 'expo':
+      return ['npx', 'expo'];
+    // The generated android/ folder's wrapper: build/local.ts finds it once prebuild made it.
+    case 'gradlew':
+      return [];
+    case 'keytool': {
+      const home = process.env.JAVA_HOME;
+      const f = home ? existing(path.join(home, 'bin', 'keytool')) : null;
+      return f ? [f] : ['keytool'];
+    }
     case 'procs':
       return [process.execPath, fileURLToPath(new URL('./procs.js', import.meta.url))];
     case 'open':
@@ -150,6 +166,10 @@ export interface RunOptions {
   binary?: boolean;
   /** Show the command's stderr live (long EAS builds). */
   liveStderr?: boolean;
+  /** Show stdout and stderr live, nothing captured (Gradle). */
+  live?: boolean;
+  /** Fully interactive: the user answers the command's prompts (eas credentials). */
+  interactive?: boolean;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -172,7 +192,9 @@ export function run(argv: string[], args: string[], options: RunOptions = {}): R
     shell,
     maxBuffer: 256 * 1024 * 1024,
     windowsHide: true,
-    stdio: ['pipe', 'pipe', options.liveStderr ? 'inherit' : 'pipe'],
+    stdio: options.interactive
+      ? 'inherit'
+      : ['pipe', options.live ? 'inherit' : 'pipe', options.live || options.liveStderr ? 'inherit' : 'pipe'],
   });
   const stdoutBytes = result.stdout ?? Buffer.alloc(0);
   return {

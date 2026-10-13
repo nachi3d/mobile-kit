@@ -21,3 +21,9 @@ export declare function easBuild(p: Project, profile: string, dest: string): Eas
  * (read-only, so it runs on a dry run too), or a stop.
  */
 export declare function latestBuildVersion(p: Project, profile: string): number;
+/**
+ * The `env` of an eas.json build profile with its `extends` chain applied,
+ * as EAS merges it (the child wins). A local build sets the same variables
+ * (e.g. the ABIs an app builds), so it builds what EAS would.
+ */
+export declare function easProfileEnv(root: string, profile: string): Record<string, string>;

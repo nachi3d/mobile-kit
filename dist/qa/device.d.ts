@@ -1,9 +1,11 @@
 import { type Project } from '../project.js';
 import { type QaRun } from './report.js';
-export declare const QA_USAGE = "Usage: mk qa:device [--apk <path>] [--skip-build] [--emulator] [--resume <dir>] [--keep-emulator] [--yes] [--no-open] [--dry-run]";
+export declare const QA_USAGE = "Usage: mk qa:device [--apk <path>] [--skip-build] [--local-build] [--emulator] [--resume <dir>] [--keep-emulator] [--yes] [--no-open] [--dry-run]";
 export interface QaOptions {
     apk?: string;
     skipBuild: boolean;
+    /** Build the qa profile on this computer (build/local.ts) instead of EAS. */
+    localBuild: boolean;
     emulator: boolean;
     /** A capture folder of an earlier run to continue. */
     resume?: string;
