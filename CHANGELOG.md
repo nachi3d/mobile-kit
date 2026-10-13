@@ -3,6 +3,37 @@
 All notable changes are listed here ([Keep a Changelog](https://keepachangelog.com/),
 [SemVer](https://semver.org/)).
 
+## [0.3.0] - 2026-10-13
+
+Android builds on this computer, for when the EAS build quota is used up,
+signed with the same production key as EAS's.
+
+### Added
+- `mk build --local --profile <eas profile>`: `expo prebuild` (clean) with
+  the profile's eas.json env (`extends` applied), Gradle `assembleRelease`
+  with the production key injected through environment variables into the
+  generated, git-ignored `android/` only, then the release APK checks
+  (package, versionName, versionCode, certificate SHA-1 = `signingSha1`;
+  a failing APK is deleted). Output `dist/<apkName>-<version>-<profile>.apk`.
+  Fits a 16 GB PC: stops below 4 GB of free RAM (with a "close Brave"
+  hint), Gradle 3 GB / 2 workers / no daemon / Kotlin in-process.
+  `package.json` / `app.json` edits by prebuild are undone, `android/` is
+  deleted, and no tracked file may change.
+- `mk qa:device --local-build`: the `qa` profile built locally, before the
+  emulator starts (they never share the RAM).
+- `mk release:build <version> --local`: the release APK built locally
+  instead of on EAS; every other check and step is unchanged.
+- `mk keystore:pull`: runs `eas credentials` (interactive), moves the
+  downloaded keystore and passwords at once to `MK_KEYSTORE_DIR`
+  (`.env.local`), outside every repository, deletes them from the app
+  folder even on failure, and checks the certificate with `keytool`.
+- New injectable tools: `MK_EXPO`, `MK_GRADLEW`, `MK_KEYTOOL`.
+
+### Security
+- Keystore passwords are never printed, never on a command line, never in
+  a file of the app. mk refuses a keystore folder inside a git repository,
+  and a pull while `credentials.json` / `*.jks` are not git-ignored.
+
 ## [0.2.2] - 2026-10-12
 
 GameTrack numbers its Android builds on EAS (`appVersionSource: "remote"`)

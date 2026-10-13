@@ -68,3 +68,33 @@ export function latestBuildVersion(p, profile) {
         fail(`EAS's latest ${profile} build has no appBuildVersion`);
     return vc;
 }
+/**
+ * The `env` of an eas.json build profile with its `extends` chain applied,
+ * as EAS merges it (the child wins). A local build sets the same variables
+ * (e.g. the ABIs an app builds), so it builds what EAS would.
+ */
+export function easProfileEnv(root, profile) {
+    const file = path.join(root, 'eas.json');
+    if (!fs.existsSync(file))
+        fail('No eas.json: a local build takes its profile (env) from eas.json');
+    let profiles;
+    try {
+        profiles = JSON.parse(fs.readFileSync(file, 'utf8')).build ?? {};
+    }
+    catch (e) {
+        fail(`eas.json is not valid JSON: ${e.message}`);
+    }
+    const seen = [];
+    const resolve = (name) => {
+        if (seen.includes(name))
+            fail(`eas.json: profiles extend each other in a loop (${[...seen, name].join(' → ')})`);
+        seen.push(name);
+        const entry = profiles[name];
+        if (!entry)
+            fail(`eas.json has no build profile "${name}" (profiles: ${Object.keys(profiles).join(', ') || 'none'})`);
+        const parent = entry.extends ? resolve(entry.extends) : {};
+        const own = Object.fromEntries(Object.entries(entry.env ?? {}).map(([k, v]) => [k, String(v)]));
+        return { ...parent, ...own };
+    };
+    return resolve(profile);
+}

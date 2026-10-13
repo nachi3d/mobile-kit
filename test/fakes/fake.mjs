@@ -58,8 +58,70 @@ function failFlow(name, step, error) {
   process.exit(1);
 }
 
+// The fixture's signing certificate (test/fixture.ts SHA1), as keytool prints it.
+const FIXTURE_SHA1 = 'AB:'.repeat(19) + 'AB';
+const APK = 'PK\x03\x04....AndroidManifest.xml....';
+
 switch (tool) {
+  case 'expo': {
+    // expo prebuild: generates android/ like Expo's template, and rewrites
+    // package.json's android script the way prebuild does.
+    if (failIf('prebuild')) process.exit(1);
+    fs.appendFileSync(env.FAKE_LOG, `expo-env APP_ABIS=${env.APP_ABIS ?? ''} SENTRY=${env.SENTRY ?? ''} NODE_ENV=${env.NODE_ENV ?? ''}\n`);
+    fs.rmSync('android', { recursive: true, force: true });
+    fs.mkdirSync('android/app', { recursive: true });
+    fs.writeFileSync(
+      'android/app/build.gradle',
+      "android {\n    signingConfigs {\n        debug {\n            storeFile file('debug.keystore')\n        }\n    }\n" +
+        '    buildTypes {\n        debug {\n            signingConfig signingConfigs.debug\n        }\n' +
+        '        release {\n            signingConfig signingConfigs.debug\n            minifyEnabled true\n        }\n    }\n}\n',
+    );
+    fs.writeFileSync('android/gradle.properties', 'org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m\norg.gradle.parallel=true\nnewArchEnabled=true\n');
+    const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+    pkg.scripts = { ...pkg.scripts, android: 'expo run:android' };
+    fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+    break;
+  }
+  case 'gradlew': {
+    // Runs in android/: the release signing must read the key from the environment.
+    const gradle = fs.readFileSync('app/build.gradle', 'utf8');
+    const props = fs.readFileSync('gradle.properties', 'utf8');
+    const problems = [];
+    if (!/release \{\s*signingConfig signingConfigs\.mkRelease/.test(gradle)) problems.push('release not signed by mkRelease');
+    if (!gradle.includes('System.getenv("MK_SIGNING_STORE_PASSWORD")')) problems.push('no signing from env');
+    if (!props.includes('org.gradle.workers.max=2') || !props.includes('-Xmx3g')) problems.push('memory settings missing');
+    if (!env.MK_SIGNING_STORE_FILE || !fs.existsSync(env.MK_SIGNING_STORE_FILE)) problems.push('no keystore file');
+    if (env.MK_SIGNING_STORE_PASSWORD !== env.FAKE_STOREPASS) problems.push('wrong store password');
+    if (!env.MK_SIGNING_KEY_ALIAS || !env.MK_SIGNING_KEY_PASSWORD) problems.push('no key alias / password');
+    fs.appendFileSync(env.FAKE_LOG, `gradlew-env APP_ABIS=${env.APP_ABIS ?? ''} signing=${problems.length ? problems.join('; ') : 'ok'}\n`);
+    if (problems.length || failIf('gradle')) process.exit(3);
+    fs.mkdirSync('app/build/outputs/apk/release', { recursive: true });
+    fs.writeFileSync('app/build/outputs/apk/release/app-release.apk', APK);
+    break;
+  }
+  case 'keytool': {
+    if (env.MK_KEYTOOL_STOREPASS !== env.FAKE_STOREPASS) {
+      process.stderr.write('keytool error: java.io.IOException: Keystore was tampered with, or password was incorrect\n');
+      process.exit(1);
+    }
+    out(`Alias name: upload\nCertificate fingerprints:\n\t SHA1: ${env.FAKE_KEYSTORE_SHA1 ?? FIXTURE_SHA1}\n\t SHA256: 00:11\n`);
+    break;
+  }
   case 'eas': {
+    if (args[0] === 'credentials') {
+      // "Download credentials from EAS to credentials.json", in the app folder.
+      if (env.FAKE_EAS_NO_CREDENTIALS) break;
+      fs.mkdirSync('credentials/android', { recursive: true });
+      fs.writeFileSync('credentials/android/keystore.jks', 'fake keystore');
+      const keystore = {
+        keystorePath: 'credentials/android/keystore.jks',
+        keystorePassword: env.FAKE_STOREPASS,
+        keyAlias: 'upload',
+        keyPassword: 'key-secret-4242',
+      };
+      fs.writeFileSync('credentials.json', JSON.stringify({ android: { keystore } }));
+      break;
+    }
     // appBuildVersion: EAS's versionCode of the build (a string, like EAS's JSON).
     const build = { status: 'FINISHED', appBuildVersion: env.FAKE_EAS_VC ?? '16', artifacts: { applicationArchiveUrl: 'https://expo.invalid/build.apk' } };
     if (args[0] === 'build:list') {

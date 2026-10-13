@@ -1,6 +1,7 @@
-// mk release:build <version> [--dry-run]
+// mk release:build <version> [--local] [--dry-run]
 //
-// Step 1 of 2 of a release: builds the production APK on EAS, verifies it,
+// Step 1 of 2 of a release: builds the production APK on EAS (--local: on
+// this computer, signed with the production key; see build/local.ts), verifies it,
 // uploads it to its versioned R2 key only and installs it on the one
 // connected phone. latest.apk is untouched: that is release:promote, after
 // the phone check.
@@ -16,14 +17,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { installedVersionCode, listDevices } from '../android.js';
 import { fileSize, sha256, verifyApk } from '../apk.js';
+import { localBuild } from '../build/local.js';
 import { easBuild } from '../eas.js';
 import { act, run } from '../exec.js';
 import { originHead } from '../http.js';
 import { detail, fail, info } from '../log.js';
 import { loadEnvLocal, openProject } from '../project.js';
 import { APK_TYPE, CACHE_IMMUTABLE, parseVersion, releaseTarget } from './common.js';
-export const BUILD_USAGE = 'Usage: mk release:build <version> [--dry-run]';
-export async function releaseBuild(args, dryRun) {
+export const BUILD_USAGE = 'Usage: mk release:build <version> [--local] [--dry-run]';
+export async function releaseBuild(args, dryRun, local = false) {
     const version = parseVersion(args, BUILD_USAGE);
     const p = openProject({ dryRun, requireDryRunInFixture: true });
     const t = releaseTarget(p, version);
@@ -33,7 +35,7 @@ export async function releaseBuild(args, dryRun) {
         fail(`HEAD is not tag v${version}. Run: git checkout v${version}`);
     const status = run(['git'], ['-C', p.root, 'status', '--porcelain']);
     if (status.status !== 0 || status.stdout.trim() !== '') {
-        fail('The working tree is not clean (git status). EAS builds what is on disk.');
+        fail(`The working tree is not clean (git status). ${local ? 'The build uses' : 'EAS builds'} what is on disk.`);
     }
     loadEnvLocal(p.root);
     const head = originHead(p.tool.curl, t.versionedUrl);
@@ -45,7 +47,13 @@ export async function releaseBuild(args, dryRun) {
     const vcLabel = t.versionCode !== null ? `versionCode ${t.versionCode}` : 'versionCode from EAS (remote)';
     info(`Preconditions OK: v${version}, ${vcLabel}, clean tree, ${t.versionedKey} is free`);
     // --- Build and download ----------------------------------------------------
-    const built = easBuild(p, p.config.easProfiles.release, t.apkPath);
+    const profile = p.config.easProfiles.release;
+    const built = local
+        ? (() => {
+            const r = localBuild(p, profile, { dest: t.apkPath, verify: false });
+            return { downloaded: r.built, appBuildVersion: null };
+        })()
+        : easBuild(p, profile, t.apkPath);
     const rel = path.relative(p.root, t.apkPath).replace(/\\/g, '/');
     let verify = true;
     if (!built.downloaded) {

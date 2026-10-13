@@ -65,6 +65,16 @@ export function loadEnvLocal(root: string): EnvLocal {
     fail('.env.local is missing: copy .env.local.example and fill it in (mobile-kit README → Setup)');
   }
   const out: EnvLocal = { cfZoneId: '', cfPurgeToken: '' };
+  for (const [key, value] of envLocalEntries(file)) {
+    if (key === 'CF_ZONE_ID') out.cfZoneId = value;
+    else if (key === 'CF_PURGE_TOKEN') out.cfPurgeToken = value;
+    else if (key === 'EXPO_TOKEN' && value) process.env.EXPO_TOKEN = value;
+  }
+  return out;
+}
+
+function envLocalEntries(file: string): [string, string][] {
+  const entries: [string, string][] = [];
   for (const rawLine of fs.readFileSync(file, 'utf8').split('\n')) {
     const line = rawLine.replace(/\r$/, '');
     if (!line || line.startsWith('#') || !line.includes('=')) continue;
@@ -73,9 +83,14 @@ export function loadEnvLocal(root: string): EnvLocal {
       .slice(line.indexOf('=') + 1)
       .trim()
       .replace(/^"(.*)"$/, '$1');
-    if (key === 'CF_ZONE_ID') out.cfZoneId = value;
-    else if (key === 'CF_PURGE_TOKEN') out.cfPurgeToken = value;
-    else if (key === 'EXPO_TOKEN' && value) process.env.EXPO_TOKEN = value;
+    entries.push([key, value]);
   }
-  return out;
+  return entries;
+}
+
+/** One value of <root>/.env.local ('' when the file or the key is missing). Never printed. */
+export function readEnvLocalValue(root: string, key: string): string {
+  const file = path.join(root, '.env.local');
+  if (!fs.existsSync(file)) return '';
+  return envLocalEntries(file).find(([k]) => k === key)?.[1] ?? '';
 }

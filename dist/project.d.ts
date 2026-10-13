@@ -25,3 +25,5 @@ export interface EnvLocal {
  * goes to the environment, where eas-cli reads it.
  */
 export declare function loadEnvLocal(root: string): EnvLocal;
+/** One value of <root>/.env.local ('' when the file or the key is missing). Never printed. */
+export declare function readEnvLocalValue(root: string, key: string): string;

@@ -12,6 +12,9 @@
 //   MK_EMULATOR   default emulator of the Android SDK
 //   MK_AVDMANAGER default avdmanager of the SDK's cmdline-tools/latest
 //   MK_PROCS      default `node dist/procs.js` (host memory, leftover processes)
+//   MK_EXPO       default "npx expo" (local builds: expo prebuild)
+//   MK_GRADLEW    default the app's android/gradlew (local builds)
+//   MK_KEYTOOL    default keytool of JAVA_HOME, else "keytool"
 //
 // A value is split on whitespace, or is a JSON array of strings when it
 // starts with "[" (for paths with spaces). An empty value means "missing"
@@ -21,7 +24,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detail } from './log.js';
-export const TOOLS = ['eas', 'wrangler', 'curl', 'adb', 'maestro', 'aapt', 'apksigner', 'open', 'emulator', 'avdmanager', 'procs'];
+export const TOOLS = [
+    'eas', 'wrangler', 'curl', 'adb', 'maestro', 'aapt', 'apksigner', 'open', 'emulator', 'avdmanager', 'procs',
+    'expo', 'gradlew', 'keytool',
+];
 export const toolEnv = (tool) => `MK_${tool.toUpperCase()}`;
 /** Android SDK folders that exist, in lookup order. */
 export function sdkRoots(env = process.env) {
@@ -90,6 +96,16 @@ function defaultCommand(tool) {
             const f = findSdkTool('cmdline-tools', 'latest', 'bin', 'avdmanager');
             return f ? [f] : ['avdmanager'];
         }
+        case 'expo':
+            return ['npx', 'expo'];
+        // The generated android/ folder's wrapper: build/local.ts finds it once prebuild made it.
+        case 'gradlew':
+            return [];
+        case 'keytool': {
+            const home = process.env.JAVA_HOME;
+            const f = home ? existing(path.join(home, 'bin', 'keytool')) : null;
+            return f ? [f] : ['keytool'];
+        }
         case 'procs':
             return [process.execPath, fileURLToPath(new URL('./procs.js', import.meta.url))];
         case 'open':
@@ -150,7 +166,9 @@ export function run(argv, args, options = {}) {
         shell,
         maxBuffer: 256 * 1024 * 1024,
         windowsHide: true,
-        stdio: ['pipe', 'pipe', options.liveStderr ? 'inherit' : 'pipe'],
+        stdio: options.interactive
+            ? 'inherit'
+            : ['pipe', options.live ? 'inherit' : 'pipe', options.live || options.liveStderr ? 'inherit' : 'pipe'],
     });
     const stdoutBytes = result.stdout ?? Buffer.alloc(0);
     return {

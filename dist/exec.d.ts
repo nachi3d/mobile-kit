@@ -1,4 +1,4 @@
-export declare const TOOLS: readonly ["eas", "wrangler", "curl", "adb", "maestro", "aapt", "apksigner", "open", "emulator", "avdmanager", "procs"];
+export declare const TOOLS: readonly ["eas", "wrangler", "curl", "adb", "maestro", "aapt", "apksigner", "open", "emulator", "avdmanager", "procs", "expo", "gradlew", "keytool"];
 export type ToolName = (typeof TOOLS)[number];
 export declare const toolEnv: (tool: ToolName) => string;
 /** Android SDK folders that exist, in lookup order. */
@@ -18,6 +18,10 @@ export interface RunOptions {
     binary?: boolean;
     /** Show the command's stderr live (long EAS builds). */
     liveStderr?: boolean;
+    /** Show stdout and stderr live, nothing captured (Gradle). */
+    live?: boolean;
+    /** Fully interactive: the user answers the command's prompts (eas credentials). */
+    interactive?: boolean;
     env?: NodeJS.ProcessEnv;
 }
 export interface RunResult {

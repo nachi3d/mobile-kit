@@ -2,7 +2,9 @@
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+import { buildCommand, LOCAL_BUILD_USAGE } from './build/local.js';
 import { EMULATOR_USAGE, ensureEmulator, parseEmulatorArgs } from './emulator.js';
+import { KEYSTORE_PULL_USAGE, keystorePull } from './keystore.js';
 import { KitError } from './log.js';
 import { openProject } from './project.js';
 import { qaDevice, QA_USAGE } from './qa/device.js';
@@ -19,19 +21,27 @@ const HELP = `mobile-kit ${version}: device QA and APK releases for Expo apps.
   ${EMULATOR_USAGE}
   ${BUILD_USAGE}
   ${PROMOTE_USAGE}
+  ${LOCAL_BUILD_USAGE}
+  ${KEYSTORE_PULL_USAGE}
 
 Run from the app folder (it has mobile-kit.config.json). See the README.`;
 
-/** --dry-run plus positionals; anything else starting with "-" is refused. */
-function releaseArgs(args: string[], usage: string): { positional: string[]; dryRun: boolean } {
+/** --dry-run (and `flags`) plus positionals; anything else starting with "-" is refused. */
+function releaseArgs(
+  args: string[],
+  usage: string,
+  flags: string[] = [],
+): { positional: string[]; dryRun: boolean; flags: Set<string> } {
   const positional: string[] = [];
+  const set = new Set<string>();
   let dryRun = false;
   for (const a of args) {
     if (a === '--dry-run') dryRun = true;
+    else if (flags.includes(a)) set.add(a);
     else if (a.startsWith('-')) throw new KitError(`Unknown option: ${a}. ${usage}`);
     else positional.push(a);
   }
-  return { positional, dryRun };
+  return { positional, dryRun, flags: set };
 }
 
 async function main(argv: string[]): Promise<void> {
@@ -59,9 +69,13 @@ async function main(argv: string[]): Promise<void> {
       return;
     }
     case 'release:build': {
-      const a = releaseArgs(rest, BUILD_USAGE);
-      return releaseBuild(a.positional, a.dryRun);
+      const a = releaseArgs(rest, BUILD_USAGE, ['--local']);
+      return releaseBuild(a.positional, a.dryRun, a.flags.has('--local'));
     }
+    case 'build':
+      return buildCommand(rest);
+    case 'keystore:pull':
+      return keystorePull(rest);
     case 'release:promote': {
       const a = releaseArgs(rest, PROMOTE_USAGE);
       return releasePromote(a.positional, a.dryRun);

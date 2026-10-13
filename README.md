@@ -5,10 +5,12 @@ device QA with screenshots, and APK releases to Cloudflare R2. Each app
 keeps only a `mobile-kit.config.json` and its Maestro flows.
 
 ```
-mk qa:device [--apk <path>] [--skip-build] [--emulator] [--resume <dir>] [--keep-emulator] [--yes] [--no-open] [--dry-run]
+mk qa:device [--apk <path>] [--skip-build] [--local-build] [--emulator] [--resume <dir>] [--keep-emulator] [--yes] [--no-open] [--dry-run]
 mk emulator [--wipe] [--dry-run]
-mk release:build <version> [--dry-run]
+mk release:build <version> [--local] [--dry-run]
 mk release:promote <version> [--dry-run]
+mk build --local --profile <eas profile> [--dry-run]
+mk keystore:pull [--dry-run]
 ```
 
 In an app these are npm scripts: `npm run qa:device`, `npm run
@@ -36,6 +38,9 @@ On the one connected phone or emulator:
    `preview`: `eas build -p android --profile preview --non-interactive
    --wait --json`), downloaded to `dist/<apkName>-<version>-qa.apk`.
    `--skip-build` builds and installs nothing: it tests what is installed.
+   `--local-build` builds the `qa` profile on this computer instead, with
+   the production key ([Local builds](#local-builds-no-eas-quota)), before
+   the emulator starts: `dist/<apkName>-<version>-<profile>.apk`.
 3. **Device.** Exactly one device on `adb devices`, otherwise it stops with
    help. With `--emulator`:
    - it refuses while a physical phone is connected (USB or Wi-Fi);
@@ -191,7 +196,9 @@ npm run release:promote -- 0.x.0    # latest.apk, cache purge, public check
 
 Then it:
 1. runs the EAS build of the `release` profile (default `production`) and
-   downloads `dist/<apkName>-<version>.apk`;
+   downloads `dist/<apkName>-<version>.apk`. With `--local`, it builds that
+   file on this computer instead ([Local builds](#local-builds-no-eas-quota)),
+   signed with the same production key;
 2. verifies the package, versionName and versionCode with `aapt2`, and the
    signature and certificate SHA-1 (= `signingSha1`) with `apksigner`. The
    versionCode must be app.json's, or, with EAS numbering, the one EAS gave
@@ -238,6 +245,108 @@ asks `Promote <version> to latest? [y/N]`. On `y` it:
    private header file, never a command line or the output;
 3. checks both public URLs: `200`, the APK content type, the same
    Content-Length, and at most `max-age=60` on `latest.apk`.
+
+## Local builds (no EAS quota)
+
+When the EAS build quota is used up, the same APKs can be built on this
+computer, **signed with the production key**: a local `qa` build installs
+over the published app (same signature), and a local release build can be
+published.
+
+```
+mk build --local --profile preview        # → dist/<apkName>-<version>-preview.apk
+mk qa:device --emulator --yes --local-build
+mk release:build <version> --local        # → dist/<apkName>-<version>.apk, then as usual
+```
+
+In an app, add the npm scripts `"keystore:pull": "mk keystore:pull"` and
+`"build:local": "mk build --local"` (then `npm run build:local -- --profile
+preview`).
+
+EAS stays the default: without `--local` / `--local-build` nothing changes.
+Local builds need the app to pin `expo.android.versionCode` in app.json
+(an app numbered by EAS cannot be built locally: mk refuses).
+
+### Keystore (once per computer)
+
+The production keystore and its passwords live **outside every
+repository**, in a folder named by `MK_KEYSTORE_DIR`:
+
+1. Choose a folder outside any git repository, e.g.
+   `D:\Dev\secrets\booktrack`, and add it to the app's `.env.local`
+   (git-ignored): `MK_KEYSTORE_DIR=D:\Dev\secrets\booktrack`.
+2. In the app folder: `npm run keystore:pull` (`mk keystore:pull`). It
+   runs `eas credentials -p android` (interactive, logged in to Expo) and
+   prints the answers to choose:
+   - build profile → **production**;
+   - **credentials.json: Upload/Download credentials between EAS servers
+     and your local json** → **Download credentials from EAS to
+     credentials.json**;
+   - then Go back → Exit.
+
+   EAS writes `credentials.json` and `credentials/android/keystore.jks` in
+   the app folder (both git-ignored; mk refuses to start otherwise). mk
+   moves them at once to `MK_KEYSTORE_DIR` (`credentials.json` +
+   `keystore.jks`), deletes them from the app folder even on failure, and
+   checks with `keytool` that the certificate SHA-1 is `signingSha1`. A
+   different key (wrong profile) is refused and deleted.
+3. Keep a copy of that folder somewhere safe (password manager, encrypted
+   drive). The key can never change: sideloaded updates need it.
+
+mk refuses a `MK_KEYSTORE_DIR` inside a git repository, and never
+overwrites an existing one (delete it to pull again). Passwords are never
+printed, never on a command line, and never in a file of the app: they
+reach `keytool` and Gradle through their environment only.
+
+### What `mk build --local` does
+
+1. **Checks**, before anything is generated: the profile exists in
+   `eas.json`; app.json pins the versionCode; the keystore is there and its
+   certificate is `signingSha1` (`keytool`); `android/` is git-ignored;
+   **at least 4 GB of RAM is free** (otherwise it stops: close Brave and
+   other browsers, Android Studio, the emulator, other Node/Java
+   processes).
+2. **Prebuild**: `expo prebuild --platform android --clean --no-install`
+   with the profile's `env` from `eas.json` (`extends` applied, as on
+   EAS), `NODE_ENV=production`. If prebuild rewrites `package.json` or
+   `app.json` (it changes the `android` script), mk puts them back byte
+   for byte; afterwards no tracked file may differ (`git status`).
+3. **In the generated `android/` only**: release builds are signed by a
+   config that reads `MK_SIGNING_*` environment variables (Expo's template
+   signs them with the debug key); `gradle.properties` gets
+   `-Xmx3g`, `org.gradle.workers.max=2`, no parallel, no daemon, Kotlin
+   in-process.
+4. **Gradle**: `gradlew assembleRelease --no-daemon --max-workers=2`, the
+   key's passwords in its environment.
+5. The APK is copied to `dist/`, `android/` is **deleted** (EAS would
+   treat a leftover `android/` as a bare project), and the APK is verified
+   like a release: package, versionName, versionCode, and certificate
+   SHA-1 = `signingSha1`. An APK that fails is deleted.
+
+`--dry-run` runs every check, the key and RAM included, and prints
+prebuild and Gradle.
+
+### Windows requirements and tips
+
+- **JDK 17** (Gradle for React Native 0.8x needs 17):
+  `winget install Microsoft.OpenJDK.17`, and set `JAVA_HOME` to it (mk
+  finds `keytool` there). Check: `java -version`, `"%JAVA_HOME%\bin\keytool" -help`.
+- **Android SDK** already set up for the emulator (`ANDROID_HOME`, e.g.
+  `D:\Dev\Android\Sdk`): Gradle installs the platform, build-tools, NDK
+  and CMake versions it needs on the first build (several GB, on that
+  drive). Accept the licences once if Gradle asks:
+  `%ANDROID_HOME%\cmdline-tools\latest\bin\sdkmanager --licenses`.
+- **`GRADLE_USER_HOME`** on the data drive (e.g. `D:\Dev\gradle`, see
+  below): Gradle's caches grow to several GB.
+- **Time**: the first build downloads Gradle, the dependencies and the NDK:
+  30–45 minutes. Later builds: about 10–20 minutes (a 16 GB PC measured
+  13 minutes).
+- **RAM**: run it alone. Close Brave and other browsers, Android Studio and
+  any emulator; do not run `npm test` at the same time. `qa:device
+  --local-build` builds **before** it starts the emulator, so they never
+  share the RAM. If Gradle still dies (`OutOfMemoryError`, "The paging
+  file is too small"), raise Windows' paging file, or reboot and build
+  first thing.
 
 ## Setup (Windows, once per computer)
 
@@ -299,6 +408,7 @@ asks `Promote <version> to latest? [y/N]`. On `y` it:
    | `CF_ZONE_ID` | dashboard → the domain → Overview → API (right column) → Zone ID |
    | `CF_PURGE_TOKEN` | the cache-purge token below |
    | `EXPO_TOKEN` | optional: expo.dev → Account settings → Access tokens |
+   | `MK_KEYSTORE_DIR` | local builds: the production keystore folder, outside every repository ([Keystore](#keystore-once-per-computer)) |
 
 ### Keep the SDK, AVDs and caches on a drive with space
 
@@ -485,8 +595,9 @@ npm run typecheck
 
 - Fakes are injected through `MK_EAS`, `MK_WRANGLER`, `MK_CURL`, `MK_ADB`,
   `MK_MAESTRO`, `MK_AAPT`, `MK_APKSIGNER`, `MK_OPEN`, `MK_EMULATOR`,
-  `MK_AVDMANAGER` and `MK_PROCS`: a command line, or a JSON array for paths
-  with spaces.
+  `MK_AVDMANAGER`, `MK_PROCS`, `MK_EXPO`, `MK_GRADLEW` and `MK_KEYTOOL`: a
+  command line, or a JSON array for paths with spaces. The fixture's
+  keystore is a fake file in a temporary folder outside the fixture repo.
   - `MK_PROCS` (default `node dist/procs.js`) reads host memory and stops
     leftover Maestro and emulator processes.
 - Timings for tests: `MK_POLL_MS`, `MK_BOOT_TIMEOUT_MS`,

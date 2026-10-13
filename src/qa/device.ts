@@ -1,12 +1,14 @@
-// mk qa:device [--apk <path>] [--skip-build] [--emulator] [--resume <dir>]
-//              [--keep-emulator] [--yes] [--no-open] [--dry-run]
+// mk qa:device [--apk <path>] [--skip-build] [--local-build] [--emulator]
+//              [--resume <dir>] [--keep-emulator] [--yes] [--no-open] [--dry-run]
 //
 // Device QA on the one connected phone or emulator (--emulator: the local
 // emulator, started if needed; refused while a physical phone is connected):
 //   1. the screenshot plan is printed first (key screens: every mode ×
 //      language × font scale; the others light/dark, first language, 1.0);
-//   2. APK: --apk, else an EAS build of the "qa" profile (--skip-build or
-//      --resume: no build and no install, test what is installed);
+//   2. APK: --apk, else an EAS build of the "qa" profile (--local-build:
+//      built on this computer with the production key, BEFORE the emulator
+//      starts, so the two never share the RAM; --skip-build or --resume: no
+//      build and no install, test what is installed);
 //   3. adb install -r, then the installed versionCode must be the expected
 //      one: app.json's when the app pins it; otherwise (EAS numbers the
 //      builds) the APK's own (aapt2, cross-checked with EAS's
@@ -47,6 +49,7 @@ import {
   type DeviceInfo,
 } from '../android.js';
 import { isApk, readBadging } from '../apk.js';
+import { localBuild, localBuildPath } from '../build/local.js';
 import { easBuild, latestBuildVersion } from '../eas.js';
 import { ensureEmulator, isEmulatorSerial, stopEmulator } from '../emulator.js';
 import { act, run, type RunResult } from '../exec.js';
@@ -59,11 +62,13 @@ import { buildPlan, settingLabel, shotKey, shotName, type Batch, type Setting } 
 import { renderReport, scaleLabel, type FlowResult, type QaRun, type SavedSettings, type Shot } from './report.js';
 
 export const QA_USAGE =
-  'Usage: mk qa:device [--apk <path>] [--skip-build] [--emulator] [--resume <dir>] [--keep-emulator] [--yes] [--no-open] [--dry-run]';
+  'Usage: mk qa:device [--apk <path>] [--skip-build] [--local-build] [--emulator] [--resume <dir>] [--keep-emulator] [--yes] [--no-open] [--dry-run]';
 
 export interface QaOptions {
   apk?: string;
   skipBuild: boolean;
+  /** Build the qa profile on this computer (build/local.ts) instead of EAS. */
+  localBuild: boolean;
   emulator: boolean;
   /** A capture folder of an earlier run to continue. */
   resume?: string;
@@ -75,7 +80,7 @@ export interface QaOptions {
 }
 
 export function parseQaArgs(args: string[]): QaOptions {
-  const o: QaOptions = { skipBuild: false, emulator: false, keepEmulator: false, yes: false, open: true, dryRun: false };
+  const o: QaOptions = { skipBuild: false, localBuild: false, emulator: false, keepEmulator: false, yes: false, open: true, dryRun: false };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--apk' || a === '--resume') {
@@ -84,12 +89,16 @@ export function parseQaArgs(args: string[]): QaOptions {
       if (a === '--apk') o.apk = value;
       else o.resume = value;
     } else if (a === '--skip-build') o.skipBuild = true;
+    else if (a === '--local-build') o.localBuild = true;
     else if (a === '--emulator') o.emulator = true;
     else if (a === '--keep-emulator') o.keepEmulator = true;
     else if (a === '--yes') o.yes = true;
     else if (a === '--no-open') o.open = false;
     else if (a === '--dry-run') o.dryRun = true;
     else fail(`Unknown option: ${a}. ${QA_USAGE}`);
+  }
+  if (o.localBuild && (o.apk || o.skipBuild || o.resume)) {
+    fail(`--local-build builds a new APK: it cannot go with --apk, --skip-build or --resume. ${QA_USAGE}`);
   }
   return o;
 }
@@ -284,6 +293,13 @@ export async function qaDevice(args: string[]): Promise<void> {
     info(`Resuming ${outDir}`);
   } else outDir = outputDir(p.root, app.version);
 
+  // --- Local build, before any emulator runs (they would share the RAM) -----
+  let localApk: string | null = null;
+  if (o.localBuild) {
+    const built = localBuild(p, config.easProfiles.qa);
+    localApk = built.built || p.dryRun ? built.apk : null;
+  }
+
   // --- Device --------------------------------------------------------------
   let serial: string;
   let ownsEmulator = false;
@@ -314,6 +330,9 @@ export async function qaDevice(args: string[]): Promise<void> {
     apk = path.resolve(o.apk);
     if (!isApk(apk)) fail(`Not an APK: ${o.apk}`);
     apkLabel = path.basename(apk);
+  } else if (o.localBuild) {
+    apk = localApk;
+    apkLabel = `local ${config.easProfiles.qa} build → ${path.basename(localBuildPath(p, config.easProfiles.qa))}`;
   } else if (o.skipBuild || previous) {
     apkLabel = previous?.apk ?? 'already installed (--skip-build)';
   } else {
