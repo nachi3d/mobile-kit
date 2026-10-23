@@ -3,6 +3,30 @@
 All notable changes are listed here ([Keep a Changelog](https://keepachangelog.com/),
 [SemVer](https://semver.org/)).
 
+## [0.3.1] - 2026-10-23
+
+### Fixed
+- `mk keystore:pull` on a French Windows: keytool printed `SHA 1:` (not
+  `SHA1:`), so mk found "no SHA-1 fingerprint" and then **deleted the
+  keystore folder** it had just written. keytool now runs with
+  `-J-Duser.language=en`, and `SHA1:`, `SHA 1:` and `SHA-1:` are all read.
+- `mk keystore:pull` never deletes the pulled files: it moves them out of
+  the app folder first, then checks them. On any failure (keytool
+  missing or failing, wrong key) they stay in `MK_KEYSTORE_DIR` and mk
+  stops with the reason, keytool's exit code and error (passwords
+  masked).
+
+### Changed
+- `mk keystore:pull` moves the files as EAS wrote them:
+  `credentials.json` unchanged, the keystore at its relative
+  `keystorePath` (`credentials/android/keystore.jks`). A relative
+  `keystorePath` is read against `MK_KEYSTORE_DIR` (`mk build --local`
+  too); folders pulled by 0.3.0 still work.
+- `mk keystore:pull` moves a `credentials.json` an earlier pull left in
+  the app folder, without running `eas credentials`.
+- keytool is looked for on PATH, then in JAVA_HOME, then in Android
+  Studio's JBR; mk says where it looked when there is none.
+
 ## [0.3.0] - 2026-10-13
 
 Android builds on this computer, for when the EAS build quota is used up,

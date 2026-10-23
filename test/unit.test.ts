@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, it } from 'node:test';
 
 import { waitButtonCentre } from '../dist/android.js';
 import { loadConfig, normalizeSha1, validateConfig } from '../dist/config.js';
-import { parseCommand } from '../dist/exec.js';
+import { findKeytool, parseCommand } from '../dist/exec.js';
 import { memoryPressure } from '../dist/host.js';
+import { parseKeytoolSha1 } from '../dist/keystore.js';
 import { parseMaestroOutput } from '../dist/qa/maestro-output.js';
 import { buildPlan } from '../dist/qa/plan.js';
 import { renderReport, type QaRun } from '../dist/qa/report.js';
@@ -223,5 +227,41 @@ describe('Maestro output', () => {
     const r = parseMaestroOutput('Device emulator-5554 not found\n\n');
     assert.equal(r.errorLine, 'Device emulator-5554 not found');
     assert.equal(parseMaestroOutput('').errorLine, null);
+  });
+});
+
+describe('keytool', () => {
+  const SHA = 'A9:72:57:A7:C0:D5:58:E2:96:03:18:FA:D7:AB:87:69:A3:52:0B:DF';
+  const HEX = SHA.replace(/:/g, '').toLowerCase();
+
+  it('reads the certificate SHA-1 in English and translated output', () => {
+    assert.equal(parseKeytoolSha1(`Certificate fingerprints:\n\t SHA1: ${SHA}\n\t SHA256: 00:11\n`), HEX);
+    // A French JDK (Windows): "SHA 1:" with a space, CRLF line ends.
+    assert.equal(parseKeytoolSha1(`Empreintes du certificat :\r\n\t SHA 1: ${SHA}\r\n\t SHA 256: 00:11\r\n`), HEX);
+    assert.equal(parseKeytoolSha1(`\t SHA-1 : ${SHA}\n`), HEX);
+    // Not SHA-256, not the signature algorithm, nothing at all.
+    assert.equal(parseKeytoolSha1('\t SHA256: 00:11\nSignature algorithm name: SHA384withRSA\n'), null);
+    assert.equal(parseKeytoolSha1(''), null);
+  });
+
+  it('is looked for on PATH, then in JAVA_HOME, then in Android Studio', () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mk-keytool-'));
+    const bin = (...parts: string[]) => {
+      const dir = path.join(base, ...parts);
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, process.platform === 'win32' ? 'keytool.exe' : 'keytool');
+      fs.writeFileSync(file, '');
+      return file;
+    };
+    const onPath = bin('path');
+    const inJavaHome = bin('jdk', 'bin');
+    const inStudio = bin('pf', 'Android', 'Android Studio', 'jbr', 'bin');
+    const env = { PATH: path.join(base, 'path'), JAVA_HOME: path.join(base, 'jdk'), ProgramFiles: path.join(base, 'pf') };
+    assert.equal(findKeytool(env), onPath);
+    assert.equal(findKeytool({ ...env, PATH: path.join(base, 'none') }), inJavaHome);
+    assert.equal(findKeytool({ ...env, PATH: '', JAVA_HOME: path.join(base, 'none') }), inStudio);
+    // On a machine with Android Studio in the real Program Files this finds it; elsewhere nothing.
+    const none = findKeytool({ PATH: '', JAVA_HOME: path.join(base, 'none'), ProgramFiles: path.join(base, 'none') });
+    assert.ok(none === null || /jbr/.test(none), String(none));
   });
 });

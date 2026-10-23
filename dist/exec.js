@@ -14,7 +14,7 @@
 //   MK_PROCS      default `node dist/procs.js` (host memory, leftover processes)
 //   MK_EXPO       default "npx expo" (local builds: expo prebuild)
 //   MK_GRADLEW    default the app's android/gradlew (local builds)
-//   MK_KEYTOOL    default keytool of JAVA_HOME, else "keytool"
+//   MK_KEYTOOL    default keytool on PATH, else of JAVA_HOME, else of Android Studio's JBR
 //
 // A value is split on whitespace, or is a JSON array of strings when it
 // starts with "[" (for paths with spaces). An empty value means "missing"
@@ -65,6 +65,34 @@ export function findBuildTool(name, env = process.env) {
     }
     return null;
 }
+/** `name` in a folder of PATH, or null. */
+export function findOnPath(name, env = process.env) {
+    for (const dir of (env.PATH ?? env.Path ?? '').split(path.delimiter)) {
+        const file = dir ? existing(path.join(dir, name)) : null;
+        if (file)
+            return file;
+    }
+    return null;
+}
+/** keytool, looked for in order: PATH, JAVA_HOME, Android Studio's bundled JDK (JBR); or null. */
+export function findKeytool(env = process.env) {
+    const onPath = findOnPath('keytool', env);
+    if (onPath)
+        return onPath;
+    const dirs = [
+        env.JAVA_HOME && path.join(env.JAVA_HOME, 'bin'),
+        env.ProgramFiles && path.join(env.ProgramFiles, 'Android', 'Android Studio', 'jbr', 'bin'),
+        env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'Programs', 'Android Studio', 'jbr', 'bin'),
+        '/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin',
+        '/opt/android-studio/jbr/bin',
+    ];
+    for (const dir of dirs) {
+        const file = dir ? existing(path.join(dir, 'keytool')) : null;
+        if (file)
+            return file;
+    }
+    return null;
+}
 /** A binary at a fixed place in the SDK (emulator, cmdline-tools), or null. */
 export function findSdkTool(...parts) {
     for (const sdk of sdkRoots()) {
@@ -101,10 +129,10 @@ function defaultCommand(tool) {
         // The generated android/ folder's wrapper: build/local.ts finds it once prebuild made it.
         case 'gradlew':
             return [];
+        // Empty when there is none: keystore.ts says where it looked.
         case 'keytool': {
-            const home = process.env.JAVA_HOME;
-            const f = home ? existing(path.join(home, 'bin', 'keytool')) : null;
-            return f ? [f] : ['keytool'];
+            const f = findKeytool();
+            return f ? [f] : [];
         }
         case 'procs':
             return [process.execPath, fileURLToPath(new URL('./procs.js', import.meta.url))];

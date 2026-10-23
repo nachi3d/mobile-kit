@@ -5,6 +5,10 @@ export declare const toolEnv: (tool: ToolName) => string;
 export declare function sdkRoots(env?: NodeJS.ProcessEnv): string[];
 /** Newest build-tools binary of the Android SDK, or null. */
 export declare function findBuildTool(name: string, env?: NodeJS.ProcessEnv): string | null;
+/** `name` in a folder of PATH, or null. */
+export declare function findOnPath(name: string, env?: NodeJS.ProcessEnv): string | null;
+/** keytool, looked for in order: PATH, JAVA_HOME, Android Studio's bundled JDK (JBR); or null. */
+export declare function findKeytool(env?: NodeJS.ProcessEnv): string | null;
 /** A binary at a fixed place in the SDK (emulator, cmdline-tools), or null. */
 export declare function findSdkTool(...parts: string[]): string | null;
 export declare function parseCommand(value: string): string[];
