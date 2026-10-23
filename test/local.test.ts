@@ -74,6 +74,7 @@ describe('mk build --local', () => {
     refuses(build(fixture({ keystore: false }), ['--local', '--profile', 'preview']), 'Run once: npm run keystore:pull');
     refuses(build(fixture(), ['--local', '--profile', 'preview'], { FAKE_KEYSTORE_SHA1: OTHER_SHA1 }), 'Not the production key');
     refuses(build(fixture(), ['--local', '--profile', 'preview'], { FAKE_STOREPASS: 'other' }), 'keytool cannot read');
+    refuses(build(fixture(), ['--local', '--profile', 'preview'], { MK_KEYTOOL: '' }), 'keytool not found');
 
     const low = fixture();
     const r = build(low, ['--local', '--profile', 'preview'], { FAKE_MEM_SEQ: '3000:0' });
@@ -153,13 +154,54 @@ describe('mk keystore:pull', () => {
     assert.ok(r.out.includes('Download credentials from EAS to credentials.json'));
     assert.ok(!fs.existsSync(path.join(f.root, 'credentials.json')));
     assert.ok(!fs.existsSync(path.join(f.root, 'credentials')));
+    // Moved as EAS wrote them: credentials.json unchanged, the keystore at its relative keystorePath.
     const saved = JSON.parse(fs.readFileSync(path.join(f.keystoreDir, 'credentials.json'), 'utf8'));
-    assert.equal(saved.android.keystore.keystorePath, 'keystore.jks');
-    assert.ok(fs.existsSync(path.join(f.keystoreDir, 'keystore.jks')));
+    assert.equal(saved.android.keystore.keystorePath, 'credentials/android/keystore.jks');
+    assert.ok(fs.existsSync(path.join(f.keystoreDir, 'credentials', 'android', 'keystore.jks')));
+    assert.match(f.calls(), /^keytool -J-Duser\.language=en .*-storepass:env MK_KEYTOOL_STOREPASS$/m);
     assert.equal(git(f), '');
     noSecretLeaked(f, r.out);
-    // The pulled key builds.
-    assert.equal(build(f, ['--local', '--profile', 'preview']).status, 0);
+    // The pulled key builds: keystorePath is read against MK_KEYSTORE_DIR.
+    const b = build(f, ['--local', '--profile', 'preview']);
+    assert.equal(b.status, 0, b.out);
+    assert.ok(f.calls().includes('gradlew-env APP_ABIS=arm64-v8a,x86_64 signing=ok'), f.calls());
+  });
+
+  it('a password with shell characters reaches keytool and Gradle intact, never a command line', () => {
+    const f = fixture({ keystore: false });
+    const password = `p@ss"w%rd!^&|<>$\`'x y;*`;
+    const r = f.run(['keystore:pull'], { FAKE_STOREPASS: password });
+    assert.equal(r.status, 0, r.out);
+    assert.equal(build(f, ['--local', '--profile', 'preview'], { FAKE_STOREPASS: password }).status, 0);
+    assert.ok(f.calls().includes('signing=ok'), f.calls());
+    assert.ok(!f.calls().includes(password) && !r.out.includes(password));
+  });
+
+  it('files an earlier pull left in the app folder: moved, eas not run', () => {
+    const f = fixture({ keystore: false });
+    f.write('credentials/android/keystore.jks', 'fake keystore');
+    const keystore = { keystorePath: 'credentials/android/keystore.jks', keystorePassword: STORE_PASSWORD, keyAlias: 'upload', keyPassword: KEY_PASSWORD };
+    f.write('credentials.json', JSON.stringify({ android: { keystore } }));
+    const r = f.run(['keystore:pull']);
+    assert.equal(r.status, 0, r.out);
+    assert.ok(r.out.includes('eas is not run'));
+    assert.ok(!/^eas /m.test(f.calls()), f.calls());
+    assert.ok(fs.existsSync(path.join(f.keystoreDir, 'credentials', 'android', 'keystore.jks')));
+    assert.ok(!fs.existsSync(path.join(f.root, 'credentials.json')));
+    assert.ok(!fs.existsSync(path.join(f.root, 'credentials')));
+  });
+
+  it('an absolute keystorePath inside the app: rewritten relative to the keystore folder', () => {
+    const f = fixture({ keystore: false });
+    f.write('keys/upload.jks', 'fake keystore');
+    const keystore = { keystorePath: path.join(f.root, 'keys', 'upload.jks'), keystorePassword: STORE_PASSWORD, keyAlias: 'upload', keyPassword: KEY_PASSWORD };
+    f.write('credentials.json', JSON.stringify({ android: { keystore } }));
+    const r = f.run(['keystore:pull']);
+    assert.equal(r.status, 0, r.out);
+    const saved = JSON.parse(fs.readFileSync(path.join(f.keystoreDir, 'credentials.json'), 'utf8'));
+    assert.equal(saved.android.keystore.keystorePath, 'keys/upload.jks');
+    assert.ok(fs.existsSync(path.join(f.keystoreDir, 'keys', 'upload.jks')));
+    assert.ok(!fs.existsSync(path.join(f.root, 'keys')));
   });
 
   it('refuses to overwrite, a keystore folder inside a repo, and files that git would track', () => {
@@ -177,12 +219,43 @@ describe('mk keystore:pull', () => {
     assert.ok(!fs.existsSync(path.join(f.keystoreDir, 'credentials.json')));
   });
 
-  it('another key (wrong profile): refused, removed from the folder and from the app', () => {
-    const f = fixture({ keystore: false });
-    refuses(f.run(['keystore:pull'], { FAKE_KEYSTORE_SHA1: OTHER_SHA1 }), 'Not the production key');
-    assert.ok(!fs.existsSync(f.keystoreDir));
+  /** After a failed check: the files are in the keystore folder, none in the app, git clean. */
+  function movedNotDeleted(f: Fixture) {
+    assert.ok(fs.existsSync(path.join(f.keystoreDir, 'credentials.json')), 'credentials.json deleted');
+    assert.ok(fs.existsSync(path.join(f.keystoreDir, 'credentials', 'android', 'keystore.jks')), 'keystore deleted');
     assert.ok(!fs.existsSync(path.join(f.root, 'credentials.json')));
+    assert.ok(!fs.existsSync(path.join(f.root, 'credentials')));
     assert.equal(git(f), '');
+  }
+
+  it('another key (wrong profile): refused, moved out of the app and kept', () => {
+    const f = fixture({ keystore: false });
+    const r = f.run(['keystore:pull'], { FAKE_KEYSTORE_SHA1: OTHER_SHA1 });
+    refuses(r, 'Not the production key');
+    assert.ok(r.out.includes('The pulled files are kept in'));
+    movedNotDeleted(f);
+  });
+
+  it('keytool missing: says where it looked, the files are moved anyway', () => {
+    const f = fixture({ keystore: false });
+    const r = f.run(['keystore:pull'], { MK_KEYTOOL: '' });
+    refuses(r, 'keytool not found (looked in PATH, JAVA_HOME');
+    movedNotDeleted(f);
+    noSecretLeaked(f, r.out);
+  });
+
+  it('keytool fails: its exit code and error are shown, the password masked, the files moved anyway', () => {
+    // credentials.json has a password the keystore does not take.
+    const g = fixture({ keystore: false });
+    g.write('credentials/android/keystore.jks', 'fake keystore');
+    const keystore = { keystorePath: 'credentials/android/keystore.jks', keystorePassword: STORE_PASSWORD, keyAlias: 'upload', keyPassword: KEY_PASSWORD };
+    g.write('credentials.json', JSON.stringify({ android: { keystore } }));
+    const bad = g.run(['keystore:pull'], { FAKE_STOREPASS: 'what-the-keystore-wants' });
+    refuses(bad, 'keytool cannot read');
+    assert.ok(bad.out.includes('exit code 1'));
+    assert.ok(bad.out.includes('password was incorrect (***)'), bad.out);
+    movedNotDeleted(g);
+    noSecretLeaked(g, bad.out);
   });
 
   it('dry run: prints eas credentials, runs it not', () => {

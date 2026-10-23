@@ -1,6 +1,6 @@
 {
   "name": "@nachi3d/mobile-kit",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Device QA (Maestro smoke flows + screenshot matrix) and APK releases to Cloudflare R2 for Nachi3D Labs' Expo apps.",
   "license": "UNLICENSED",
   "private": true,

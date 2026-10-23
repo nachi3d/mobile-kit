@@ -286,17 +286,40 @@ repository**, in a folder named by `MK_KEYSTORE_DIR`:
 
    EAS writes `credentials.json` and `credentials/android/keystore.jks` in
    the app folder (both git-ignored; mk refuses to start otherwise). mk
-   moves them at once to `MK_KEYSTORE_DIR` (`credentials.json` +
-   `keystore.jks`), deletes them from the app folder even on failure, and
-   checks with `keytool` that the certificate SHA-1 is `signingSha1`. A
-   different key (wrong profile) is refused and deleted.
+   **moves** them at once to `MK_KEYSTORE_DIR`, keeping the keystore's
+   relative path, so `credentials.json` is unchanged:
+
+   ```
+   <MK_KEYSTORE_DIR>\credentials.json
+   <MK_KEYSTORE_DIR>\credentials\android\keystore.jks
+   ```
+
+   Then it checks with `keytool` that the certificate SHA-1 is
+   `signingSha1`. Whatever fails (keytool missing or failing, another key
+   from the wrong profile), the files are moved first: nothing is left in
+   the app folder and the pulled files are never deleted. mk stops with the
+   reason, keytool's exit code and its error (passwords masked).
+   If an earlier pull left `credentials.json` in the app folder, mk moves
+   it without running `eas credentials` again.
 3. Keep a copy of that folder somewhere safe (password manager, encrypted
    drive). The key can never change: sideloaded updates need it.
+
+A relative `keystorePath` is read against `MK_KEYSTORE_DIR` (by
+`mk build --local` too); a folder pulled by mobile-kit 0.3.0 (`keystore.jks`
+next to `credentials.json`) still works.
+
+**keytool** is looked for on `PATH`, then in `%JAVA_HOME%\bin`, then in
+Android Studio's bundled JDK (`C:\Program Files\Android\Android
+Studio\jbr\bin`); `MK_KEYTOOL` overrides. It runs with
+`-J-Duser.language=en`; mk reads both `SHA1:` and translated `SHA 1:` lines
+(a French JDK prints the latter).
 
 mk refuses a `MK_KEYSTORE_DIR` inside a git repository, and never
 overwrites an existing one (delete it to pull again). Passwords are never
 printed, never on a command line, and never in a file of the app: they
-reach `keytool` and Gradle through their environment only.
+reach `keytool` (`-storepass:env`) and Gradle through their environment
+only, and keytool is spawned without a shell, so any character works
+under cmd.exe, PowerShell or Git Bash.
 
 ### What `mk build --local` does
 

@@ -101,10 +101,17 @@ switch (tool) {
   }
   case 'keytool': {
     if (env.MK_KEYTOOL_STOREPASS !== env.FAKE_STOREPASS) {
-      process.stderr.write('keytool error: java.io.IOException: Keystore was tampered with, or password was incorrect\n');
+      // Echoes the password it got: mk must mask it when it shows this.
+      process.stderr.write(`keytool error: java.io.IOException: Keystore was tampered with, or password was incorrect (${env.MK_KEYTOOL_STOREPASS})\n`);
       process.exit(1);
     }
-    out(`Alias name: upload\nCertificate fingerprints:\n\t SHA1: ${env.FAKE_KEYSTORE_SHA1 ?? FIXTURE_SHA1}\n\t SHA256: 00:11\n`);
+    const sha1 = env.FAKE_KEYSTORE_SHA1 ?? FIXTURE_SHA1;
+    // Like a JDK on a French Windows: translated output unless -J-Duser.language=en.
+    if (!args.includes('-J-Duser.language=en')) {
+      out(`Nom d'alias : upload\r\nEmpreintes du certificat :\r\n\t SHA 1: ${sha1}\r\n\t SHA 256: 00:11\r\n`);
+      break;
+    }
+    out(`Alias name: upload\nCertificate fingerprints:\n\t SHA1: ${sha1}\n\t SHA256: 00:11\n`);
     break;
   }
   case 'eas': {
