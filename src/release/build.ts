@@ -53,10 +53,7 @@ export async function releaseBuild(args: string[], dryRun: boolean, local = fals
   // --- Build and download ----------------------------------------------------
   const profile = p.config.easProfiles.release;
   const built = local
-    ? (() => {
-        const r = localBuild(p, profile, { dest: t.apkPath, verify: false });
-        return { downloaded: r.built, appBuildVersion: null };
-      })()
+    ? { downloaded: (await localBuild(p, profile, { dest: t.apkPath, verify: false })).built, appBuildVersion: null }
     : easBuild(p, profile, t.apkPath);
   const rel = path.relative(p.root, t.apkPath).replace(/\\/g, '/');
   let verify = true;

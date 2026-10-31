@@ -3,6 +3,59 @@
 All notable changes are listed here ([Keep a Changelog](https://keepachangelog.com/),
 [SemVer](https://semver.org/)).
 
+## [0.3.2] - 2026-10-31
+
+What the BookTrack 0.5.0 emulator run of 2026-10-23 taught: 0/11 smoke and
+0/34 screenshots, all because of the bench (a JRE as JAVA_HOME, an
+emulator starved of memory, a killed run that left everything running).
+
+### Added
+- `mk build --local` (and `--dry-run`) checks that `JAVA_HOME` is a
+  **JDK 17**: `bin\javac(.exe)` present, version 17 (its `release` file,
+  else `javac -version`). Otherwise it stops with the cause (not set,
+  missing, a JRE, JDK 21…) and the fix: `setx JAVA_HOME "<JDK 17 found in
+  Program Files>"`, or `winget install Microsoft.OpenJDK.17`.
+- `qa:device`: **"Process system isn't responding"** (Android's own
+  system_server) gets Wait tapped like other apps' ANR dialogs, and is
+  counted; past 3 the run stops cleanly with "Emulator saturated" (or
+  "Device saturated") on top of the report, device restored.
+- `qa:device`: a **known device state** before the flows: night mode
+  `no`, `font_scale` 1.0, animations off. Dark batches switch night mode
+  back off when done. Animations are saved and restored too; on the
+  emulator everything goes back to the known state, never to what a
+  killed run left (font_scale 1.3 on 2026-10-23).
+- **Software rendering warning**: after each boot mk reads the GLES
+  renderer (`dumpsys SurfaceFlinger`); SwiftShader while `gpu` asks for a
+  GPU mode is a `SOFTWARE RENDERING` warning in the console (`mk
+  emulator`, `qa:device`) and on top of report.html.
+- `qa:device --resume <dir> --retry-failed`: the smoke flows that failed
+  run again too.
+- `qa:device --migration-from <old apk>`: uninstall, install the old APK,
+  `<maestroDir>/migration/seed.yaml`, install the APK under test with
+  `-r`, `<maestroDir>/migration/verify-upgrade.yaml`, then the usual run.
+  Asks first (the uninstall wipes the data); the old APK must be the same
+  package and older. A Migration table and badge in the report; a failure
+  fails the run.
+- A **guard** process for each `qa:device` run (`procs.js guard`,
+  detached, nobody's child): when mk is killed it kills what mk started
+  (Maestro, adb sessions, the emulator it booted) and Maestro/adb
+  processes still on the device; when the shell or terminal that started
+  mk dies, mk's children are killed, mk stops at its next checkpoint and
+  restores the device, and is killed after 90 s if it is still there.
+  `MK_GUARD_LOG` logs what it does.
+- A second Ctrl+C stops at once: Maestro, adb and the emulator mk started
+  are killed (exit 130).
+
+### Changed
+- A failed Gradle build no longer says "Out of memory?" by default: mk
+  reads Gradle's output (shown live, its end kept) and names the probable
+  cause: no Java compiler (a JRE), wrong JDK version, a real out of
+  memory (`Java heap space`, `Metaspace`…), or Gradle's own "What went
+  wrong" lines.
+- `localBuild()` is async (Gradle's output is teed).
+- `qa:device` installs the APK inside the run, so a wrong versionCode now
+  also leaves a report saying why it stopped.
+
 ## [0.3.1] - 2026-10-23
 
 ### Fixed

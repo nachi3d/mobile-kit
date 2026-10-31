@@ -1,3 +1,4 @@
+import { type AnrDialog } from './android.js';
 import { type EmulatorConfig, type GpuMode } from './config.js';
 import type { Project } from './project.js';
 export declare const EMULATOR_USAGE = "Usage: mk emulator [--wipe] [--dry-run]";
@@ -15,7 +16,18 @@ export interface EmulatorReady {
     serial: string;
     /** This call started it (it was not already running). */
     started: boolean;
+    /** SurfaceFlinger's GLES renderer, or null when it cannot be read (dry run). */
+    renderer: string | null;
+    /**
+     * The emulator renders in software (SwiftShader) although the config asks
+     * for a GPU mode (host…): it will use far more host memory. Null when unknown.
+     */
+    softwareRendering: string | null;
+    /** An ANR dialog dismissed (or not) after the boot. */
+    anr: AnrDialog | null;
 }
+/** Why the rendering is a problem: software although `requested` is a GPU mode; null when fine. */
+export declare function softwareRenderingWarning(requested: GpuMode, renderer: string | null): string | null;
 /** Emulator command-line arguments. */
 export declare function emulatorArgs(e: EmulatorConfig, gpu: GpuMode, o: EmulatorStart): string[];
 /** Stops the AVD's emulator: `adb emu kill`, then its processes if it does not go away. */

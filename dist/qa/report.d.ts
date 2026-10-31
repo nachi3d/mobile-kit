@@ -26,6 +26,16 @@ export interface SavedSettings {
     night: string;
     fontScale: string;
     appLocales: string | null;
+    /** Window, transition and animator scales ("null" = never set); absent in runs before 0.3.2. */
+    animations?: string[];
+}
+/** --migration-from: the old APK, its seed flow, the upgrade, the verify flow. */
+export interface MigrationRun {
+    /** The old APK's file name. */
+    from: string;
+    fromVersionCode: number | null;
+    seed?: FlowResult;
+    verify?: FlowResult;
 }
 export interface QaRun {
     appName: string;
@@ -51,6 +61,9 @@ export interface QaRun {
     /** Every planned screenshot; those not run yet have neither file nor error. */
     shots: Shot[];
     notes: string[];
+    /** Problems of the test bench itself (software rendering, a saturated emulator): shown on top. */
+    warnings?: string[];
+    migration?: MigrationRun;
 }
 export declare const scaleLabel: (scale: number) => string;
 /** The QA gallery: one self-contained page next to the PNGs. */

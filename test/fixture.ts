@@ -51,6 +51,10 @@ export interface Fixture {
   avdHome: string;
   /** The production keystore folder (outside the fixture repo); MK_KEYSTORE_DIR points at it. */
   keystoreDir: string;
+  /** A fake JDK 17 (bin/javac, release file); JAVA_HOME points at it. */
+  jdkHome: string;
+  /** Makes a fake Java home; `javac` false for a JRE. */
+  makeJava(name: string, version: string, javac: boolean): string;
   run(args: string[], env?: Record<string, string | undefined>, input?: string): Result;
   /** mk running in the background (a test kills it). */
   start(args: string[], env?: Record<string, string | undefined>): ChildProcess;
@@ -86,6 +90,15 @@ export function makeFixture(
   const stateFile = path.join(base, 'device.json');
   const avdHome = path.join(base, 'avd');
   fs.mkdirSync(avdHome);
+  const makeJava = (name: string, version: string, javac: boolean) => {
+    const home = path.join(base, 'java', name);
+    fs.mkdirSync(path.join(home, 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(home, 'release'), `IMPLEMENTOR="Fake"\nJAVA_VERSION="${version}"\n`);
+    fs.writeFileSync(path.join(home, 'bin', 'java.exe'), '');
+    if (javac) fs.writeFileSync(path.join(home, 'bin', 'javac.exe'), '');
+    return home;
+  };
+  const jdkHome = makeJava('jdk-17', '17.0.18', true);
   const keystoreDir = path.join(base, 'secrets', 'exampleapp');
   if (options.keystore ?? true) {
     fs.mkdirSync(keystoreDir, { recursive: true });
@@ -145,6 +158,7 @@ export function makeFixture(
     MK_GRADLEW: fake('gradlew'),
     MK_KEYTOOL: fake('keytool'),
     MK_KEYSTORE_DIR: keystoreDir,
+    JAVA_HOME: jdkHome,
     FAKE_STOREPASS: STORE_PASSWORD,
     MK_POLL_MS: '20',
     MK_SETTLE_MS: '0',
@@ -161,6 +175,8 @@ export function makeFixture(
     root,
     avdHome,
     keystoreDir,
+    jdkHome,
+    makeJava,
     write,
     run(args, env = {}, input = '') {
       const r = spawnSync(process.execPath, [CLI, ...args], { cwd: root, encoding: 'utf8', input, env: mkEnv(env) });

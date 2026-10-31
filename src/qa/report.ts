@@ -29,6 +29,17 @@ export interface SavedSettings {
   night: string;
   fontScale: string;
   appLocales: string | null;
+  /** Window, transition and animator scales ("null" = never set); absent in runs before 0.3.2. */
+  animations?: string[];
+}
+
+/** --migration-from: the old APK, its seed flow, the upgrade, the verify flow. */
+export interface MigrationRun {
+  /** The old APK's file name. */
+  from: string;
+  fromVersionCode: number | null;
+  seed?: FlowResult;
+  verify?: FlowResult;
 }
 
 export interface QaRun {
@@ -55,6 +66,9 @@ export interface QaRun {
   /** Every planned screenshot; those not run yet have neither file nor error. */
   shots: Shot[];
   notes: string[];
+  /** Problems of the test bench itself (software rendering, a saturated emulator): shown on top. */
+  warnings?: string[];
+  migration?: MigrationRun;
 }
 
 const esc = (s: string) =>
@@ -77,13 +91,20 @@ export function renderReport(r: QaRun): string {
   const values = (key: 'mode' | 'lang') => [...new Set(r.shots.map((s) => s[key]))];
   const scales = [...new Set(r.shots.map((s) => s.scale))];
 
-  const smokeRows = r.smoke
-    .map(
-      (f) => `<tr class="${f.ok ? 'pass' : 'fail'}"><td>${f.ok ? 'PASS' : 'FAIL'}</td><td>${esc(f.flow)}</td>` +
-        `<td>${f.seconds.toFixed(1)} s</td><td>${f.errorLine ? `<b>${esc(f.errorLine)}</b>` : ''}${debugLinks(f.debug)}` +
-        `${f.error ? `<details><summary>Maestro output</summary><pre>${esc(f.error)}</pre></details>` : ''}</td></tr>`,
-    )
-    .join('\n');
+  const flowRow = (f: FlowResult) =>
+    `<tr class="${f.ok ? 'pass' : 'fail'}"><td>${f.ok ? 'PASS' : 'FAIL'}</td><td>${esc(f.flow)}</td>` +
+    `<td>${f.seconds.toFixed(1)} s</td><td>${f.errorLine ? `<b>${esc(f.errorLine)}</b>` : ''}${debugLinks(f.debug)}` +
+    `${f.error ? `<details><summary>Maestro output</summary><pre>${esc(f.error)}</pre></details>` : ''}</td></tr>`;
+  const smokeRows = r.smoke.map(flowRow).join('\n');
+
+  const m = r.migration;
+  const migrationFailed = !!m && !(m.seed?.ok && m.verify?.ok);
+  const migrationFlows = m ? [m.seed, m.verify].filter((f): f is FlowResult => !!f) : [];
+  const migration = m
+    ? `<h2>Migration from ${esc(m.from)}${m.fromVersionCode !== null ? ` (versionCode ${m.fromVersionCode})` : ''}</h2>\n` +
+      (migrationFlows.length ? `<table>${migrationFlows.map(flowRow).join('\n')}</table>` : '<p class="meta">Not run.</p>')
+    : '';
+  const warnings = (r.warnings ?? []).map((w) => `<p class="incomplete warning">${esc(w)}</p>`).join('\n');
 
   const filter = (name: string, items: string[]) =>
     `<fieldset><legend>${name}</legend>${items
@@ -139,6 +160,7 @@ figure img { width: 100%; display: block; border-radius: 6px; }
 figcaption { text-align: center; color: var(--muted); padding-top: 4px; font-size: 12px; }
 .incomplete { border: 1px solid var(--fail); border-radius: 8px; padding: 8px 12px; color: var(--fail); }
 .missing.pending { color: var(--muted); }
+.warning { font-weight: 600; }
 .missing { aspect-ratio: 9 / 19; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--fail); padding: 8px; }
 ul.notes { color: var(--muted); }
 small.debug { display: block; margin-top: 4px; } a { color: inherit; }
@@ -155,14 +177,16 @@ ${
     ? ''
     : `<p class="incomplete">Incomplete run: ${notRun} screenshot(s) not captured. Continue it with<br><code>mk qa:device --resume ${esc(r.outDir)}</code> (add <code>--emulator</code> for the emulator).</p>`
 }
+${warnings}
 <p class="summary">
-<span class="${smokeFailed ? 'bad' : 'good'}">Smoke: ${r.smoke.length - smokeFailed}/${r.smoke.length} passed</span>
+${m ? `<span class="${migrationFailed ? 'bad' : 'good'}">Migration: ${migrationFailed ? 'FAILED' : 'passed'}</span>\n` : ''}<span class="${smokeFailed ? 'bad' : 'good'}">Smoke: ${r.smoke.length - smokeFailed}/${r.smoke.length} passed</span>
 <span class="${shotsFailed ? 'bad' : 'good'}">Screenshots: ${r.shots.length - shotsFailed}/${r.shots.length}</span>${
     notRun ? `
 <span class="bad">Not captured: ${notRun}</span>` : ''
   }
 </p>
 ${r.notes.length ? `<ul class="notes">${r.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
+${migration}
 <h2>Maestro smoke flows</h2>
 ${r.smoke.length ? `<table>${smokeRows}</table>` : '<p class="meta">None run.</p>'}
 <div class="filters">${filter('mode', values('mode'))}${filter('lang', values('lang'))}${filter('scale', scales.map(scaleLabel))}</div>

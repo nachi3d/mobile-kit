@@ -19,7 +19,7 @@
 // A value is split on whitespace, or is a JSON array of strings when it
 // starts with "[" (for paths with spaces). An empty value means "missing"
 // (aapt2 / apksigner only).
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -206,6 +206,46 @@ export function run(argv, args, options = {}) {
         stderr: (result.stderr?.toString('utf8') ?? String(result.error ?? '')).replace(/\r/g, ''),
     };
 }
+/** How much of a teed command's output is kept (its end): enough for Gradle's error block. */
+const TEE_KEEP = 1024 * 1024;
+/**
+ * Like run() with `live`: the output is shown as it comes, and its last
+ * megabyte is also kept in stdout/stderr, to read why it failed (Gradle).
+ */
+export function runTee(argv, args, options = {}) {
+    const [cmd, ...pre] = argv;
+    if (!cmd)
+        throw new Error('Empty command');
+    const all = [...pre, ...args];
+    const shell = process.platform === 'win32' && windowsScript(cmd);
+    return new Promise((resolve) => {
+        const child = spawn(shell ? [cmd, ...all].map(cmdQuote).join(' ') : cmd, shell ? [] : all, {
+            cwd: options.cwd,
+            env: options.env ?? process.env,
+            shell,
+            windowsHide: true,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        const kept = { stdout: '', stderr: '' };
+        const keep = (which, to) => (chunk) => {
+            to.write(chunk);
+            kept[which] = (kept[which] + chunk.toString('utf8')).slice(-TEE_KEEP);
+        };
+        child.stdout.on('data', keep('stdout', process.stdout));
+        child.stderr.on('data', keep('stderr', process.stderr));
+        let error = null;
+        child.on('error', (e) => (error = e));
+        child.on('close', (code) => {
+            const stdout = kept.stdout.replace(/\r/g, '');
+            resolve({
+                status: error ? 127 : (code ?? 1),
+                stdout,
+                stdoutBytes: Buffer.from(stdout),
+                stderr: (kept.stderr || (error ? String(error) : '')).replace(/\r/g, ''),
+            });
+        });
+    });
+}
 const shellQuote = (arg) => (/^[\w./:=@+,-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`);
 export const formatCommand = (argv) => argv.map(shellQuote).join(' ');
 /**
@@ -218,4 +258,10 @@ export function act(dryRun, argv, args, options = {}) {
         return { status: 0, stdout: '', stdoutBytes: Buffer.alloc(0), stderr: '' };
     }
     return run(argv, args, options);
+}
+/** act() for runTee(): in a dry run only printed. */
+export function actTee(dryRun, argv, args, options = {}) {
+    if (dryRun)
+        return Promise.resolve(act(true, argv, args));
+    return runTee(argv, args, options);
 }
