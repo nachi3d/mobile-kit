@@ -25,6 +25,12 @@ export declare function getNightMode(adb: string[], serial: string): string;
 /** "null" when never set (the system default, 1.0). */
 export declare function getFontScale(adb: string[], serial: string): string;
 export declare function setFontScaleArgs(value: string): string[];
+/** The three animation scales Maestro wants at 0 (window, transition, animator). */
+export declare const ANIMATION_SETTINGS: readonly ["window_animation_scale", "transition_animation_scale", "animator_duration_scale"];
+/** Their current values, "null" when never set (the default, 1). */
+export declare function getAnimationScales(adb: string[], serial: string): string[];
+/** One animation scale back to `value` ("null": deleted, the default). */
+export declare function setAnimationArgs(key: string, value: string): string[];
 /** Android 13+: "Locales for <pkg> for user 0 are [fr-FR]" → "fr-FR" ("" = follows the system). */
 export declare function getAppLocales(adb: string[], serial: string, pkg: string): string;
 /** An empty list puts the app back on the system language. */
@@ -36,9 +42,31 @@ export declare function focusedAnr(adb: string[], serial: string): string | null
 /** Centre of the dialog's Wait button (android:id/aerr_wait) in a uiautomator dump. */
 export declare function waitButtonCentre(xml: string): [number, number] | null;
 /**
- * Another app's ANR dialog (e.g. "Pixel Launcher isn't responding" after a
- * cold boot) covers the app and fails every flow: tap its Wait button. An
- * ANR of the app under test is left alone; it is a finding. Returns a note
- * for the report, or null when there was nothing to do.
+ * "Process system isn't responding": Android's own system_server, not an
+ * app. It means the device itself is starved (an emulator out of host
+ * memory, on 2026-10-23); its dialog names the process "system" (or
+ * "android").
  */
-export declare function dismissForeignAnr(dryRun: boolean, adb: string[], serial: string, appPackage: string): string | null;
+export declare const isSystemAnr: (pkg: string) => pkg is "android" | "system" | "system_server";
+export interface AnrDialog {
+    /** The process the dialog is about. */
+    pkg: string;
+    /** Android's system process: counted by qa:device (EMULATOR_SATURATED_AFTER). */
+    system: boolean;
+    /** Wait was tapped (the dialog is gone). */
+    tapped: boolean;
+    /** For the report. */
+    note: string;
+}
+/**
+ * Another app's ANR dialog (e.g. "Pixel Launcher isn't responding" after a
+ * cold boot), or the system's own ("Process system isn't responding"),
+ * covers the app and fails every flow: tap its Wait button. An ANR of the
+ * app under test is left alone; it is a finding. Returns what was found, or
+ * null when there was nothing to do.
+ */
+export declare function dismissForeignAnr(dryRun: boolean, adb: string[], serial: string, appPackage: string): AnrDialog | null;
+/** The GLES line of SurfaceFlinger, e.g. "Google (NVIDIA Corporation), Android Emulator OpenGL ES Translator (…)". */
+export declare function glesRenderer(adb: string[], serial: string): string | null;
+/** SwiftShader (or another CPU renderer): the emulator draws in software, the memory hog of 2026-10-11. */
+export declare const isSoftwareRenderer: (renderer: string) => boolean;

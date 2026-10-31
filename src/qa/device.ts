@@ -1,5 +1,6 @@
 // mk qa:device [--apk <path>] [--skip-build] [--local-build] [--emulator]
-//              [--resume <dir>] [--keep-emulator] [--yes] [--no-open] [--dry-run]
+//              [--resume <dir> [--retry-failed]] [--migration-from <old apk>]
+//              [--keep-emulator] [--yes] [--no-open] [--dry-run]
 //
 // Device QA on the one connected phone or emulator (--emulator: the local
 // emulator, started if needed; refused while a physical phone is connected):
@@ -9,24 +10,42 @@
 //      built on this computer with the production key, BEFORE the emulator
 //      starts, so the two never share the RAM; --skip-build or --resume: no
 //      build and no install, test what is installed);
-//   3. adb install -r, then the installed versionCode must be the expected
+//   3. a guard process (guard.ts) watches the run from here: if mk, or the
+//      terminal or shell that started it, is killed, it kills what mk
+//      started (Maestro, adb sessions, the emulator mk booted);
+//   4. the device in a known state: night mode no, font_scale 1.0,
+//      animations off (dark screenshots switch night mode on, then back);
+//   5. --migration-from <old apk>: the app is uninstalled (its data goes),
+//      the old APK installed, <maestroDir>/migration/seed.yaml creates data
+//      on it; the APK under test is then installed over it (step 6) and
+//      <maestroDir>/migration/verify-upgrade.yaml checks the data survived;
+//   6. adb install -r, then the installed versionCode must be the expected
 //      one: app.json's when the app pins it; otherwise (EAS numbers the
 //      builds) the APK's own (aapt2, cross-checked with EAS's
 //      appBuildVersion when mk built it), the latest EAS build of the qa
 //      profile with --skip-build, or the resumed run's with --resume;
-//   4. Maestro smoke flows (<maestroDir>/smoke/*.yaml, in name order);
-//   5. screenshots in batches of one device setting, captured with adb
+//   7. Maestro smoke flows (<maestroDir>/smoke/*.yaml, in name order);
+//   8. screenshots in batches of one device setting, captured with adb
 //      screencap. With --emulator, the emulator is cold-restarted before
 //      each batch, and mid-batch when host memory runs low; after each
 //      boot, a Maestro health check (`maestro hierarchy`), and one driver
 //      reinstall if it fails. A batch with 2+ failed screenshots runs
 //      once more (after a cold restart on the emulator);
-//   6. the device's night mode, font scale and app language are restored,
-//      also on failure or Ctrl+C;
-//   7. .images/captures/<date>-v<version>/ holds results.json and
+//   9. "isn't responding" dialogs of other apps get Wait tapped; Android's
+//      own ("Process system isn't responding") too, and they are counted:
+//      past EMULATOR_SATURATED_AFTER of them the run stops (the device is
+//      saturated, every later flow would fail). Software rendering
+//      (SwiftShader) although a GPU mode was asked for is a warning on top
+//      of the report;
+//  10. the device's night mode, font scale, animations and app language
+//      are restored, also on failure or Ctrl+C (a second Ctrl+C kills
+//      everything at once). On the emulator they go back to the known
+//      state of step 4, never to what an earlier killed run left;
+//  11. .images/captures/<date>-v<version>/ holds results.json and
 //      report.html, rewritten after every step: a killed run still leaves
-//      a report, and --resume <dir> continues it. Each failed flow's
-//      Maestro debug folder is copied into debug/<name>/.
+//      a report, and --resume <dir> continues it (--retry-failed: its
+//      failed smoke flows run again too). Each failed flow's Maestro debug
+//      folder is copied into debug/<name>/.
 //
 // --dry-run reads the device and prints every change, build, install and
 // flow instead of running it.
@@ -34,8 +53,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import {
+  ANIMATION_SETTINGS,
   deviceInfo,
   dismissForeignAnr,
+  getAnimationScales,
   getAppLocales,
   getFontScale,
   getNightMode,
@@ -43,26 +64,38 @@ import {
   listDevices,
   requireOneDevice,
   screencap,
+  setAnimationArgs,
   setAppLocalesArgs,
   setFontScaleArgs,
   shellAct,
+  type AnrDialog,
   type DeviceInfo,
 } from '../android.js';
 import { isApk, readBadging } from '../apk.js';
 import { localBuild, localBuildPath } from '../build/local.js';
 import { easBuild, latestBuildVersion } from '../eas.js';
-import { ensureEmulator, isEmulatorSerial, stopEmulator } from '../emulator.js';
+import { ensureEmulator, isEmulatorSerial, stopEmulator, type EmulatorReady } from '../emulator.js';
 import { act, run, type RunResult } from '../exec.js';
-import { hostMemory, killLeftoverMaestro, memoryPressure } from '../host.js';
+import { hostMemory, killChildren, killEmulatorProcesses, killLeftoverMaestro, memoryPressure, startGuard, type Guard } from '../host.js';
 import { detail, fail, info, KitError, warn } from '../log.js';
 import { openProject, type Project } from '../project.js';
 import { confirm } from '../prompt.js';
 import { parseMaestroOutput } from './maestro-output.js';
 import { buildPlan, settingLabel, shotKey, shotName, type Batch, type Setting } from './plan.js';
-import { renderReport, scaleLabel, type FlowResult, type QaRun, type SavedSettings, type Shot } from './report.js';
+import { renderReport, scaleLabel, type FlowResult, type MigrationRun, type QaRun, type SavedSettings, type Shot } from './report.js';
 
 export const QA_USAGE =
-  'Usage: mk qa:device [--apk <path>] [--skip-build] [--local-build] [--emulator] [--resume <dir>] [--keep-emulator] [--yes] [--no-open] [--dry-run]';
+  'Usage: mk qa:device [--apk <path>] [--skip-build] [--local-build] [--emulator] [--resume <dir> [--retry-failed]] ' +
+  '[--migration-from <old apk>] [--keep-emulator] [--yes] [--no-open] [--dry-run]';
+
+/** "Process system isn't responding" more than this many times: the device is saturated, the run stops. */
+export const EMULATOR_SATURATED_AFTER = 3;
+
+/** The state every run starts from (step 4); the emulator goes back to it at the end. */
+export const KNOWN_STATE = { night: 'no', fontScale: '1.0', animations: ANIMATION_SETTINGS.map(() => '0') };
+
+/** --migration-from: its two flows, relative to maestroDir. */
+export const MIGRATION_FLOWS = { seed: 'migration/seed.yaml', verify: 'migration/verify-upgrade.yaml' } as const;
 
 export interface QaOptions {
   apk?: string;
@@ -72,6 +105,10 @@ export interface QaOptions {
   emulator: boolean;
   /** A capture folder of an earlier run to continue. */
   resume?: string;
+  /** With --resume: the smoke flows that failed run again (by default only those not run yet). */
+  retryFailed: boolean;
+  /** An older APK of the app: installed first, seeded, then upgraded to the APK under test. */
+  migrationFrom?: string;
   /** Leave the emulator running at the end (by default mk stops one it started). */
   keepEmulator: boolean;
   yes: boolean;
@@ -80,15 +117,26 @@ export interface QaOptions {
 }
 
 export function parseQaArgs(args: string[]): QaOptions {
-  const o: QaOptions = { skipBuild: false, localBuild: false, emulator: false, keepEmulator: false, yes: false, open: true, dryRun: false };
+  const o: QaOptions = {
+    skipBuild: false,
+    localBuild: false,
+    emulator: false,
+    retryFailed: false,
+    keepEmulator: false,
+    yes: false,
+    open: true,
+    dryRun: false,
+  };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === '--apk' || a === '--resume') {
+    if (a === '--apk' || a === '--resume' || a === '--migration-from') {
       const value = args[++i];
       if (!value) fail(`${a} needs a path. ${QA_USAGE}`);
       if (a === '--apk') o.apk = value;
-      else o.resume = value;
+      else if (a === '--resume') o.resume = value;
+      else o.migrationFrom = value;
     } else if (a === '--skip-build') o.skipBuild = true;
+    else if (a === '--retry-failed') o.retryFailed = true;
     else if (a === '--local-build') o.localBuild = true;
     else if (a === '--emulator') o.emulator = true;
     else if (a === '--keep-emulator') o.keepEmulator = true;
@@ -99,6 +147,10 @@ export function parseQaArgs(args: string[]): QaOptions {
   }
   if (o.localBuild && (o.apk || o.skipBuild || o.resume)) {
     fail(`--local-build builds a new APK: it cannot go with --apk, --skip-build or --resume. ${QA_USAGE}`);
+  }
+  if (o.retryFailed && !o.resume) fail(`--retry-failed goes with --resume <dir>: it reruns the failed smoke flows of that run. ${QA_USAGE}`);
+  if (o.migrationFrom && (o.skipBuild || o.resume)) {
+    fail(`--migration-from installs the APK under test over the old one: not with --skip-build or --resume. ${QA_USAGE}`);
   }
   return o;
 }
@@ -113,9 +165,12 @@ const yamlFiles = (dir: string) =>
 
 /** Ctrl+C (or a terminal closing) sets this; the run stops at the next step and restores the device. */
 let interrupted = false;
+/** The run's guard: it tells when the process that started mk is gone. */
+let guard: Guard | null = null;
 async function checkpoint(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve));
   if (interrupted) throw new KitError('Interrupted (Ctrl+C)');
+  if (guard?.orphaned()) throw new KitError('The terminal or shell that started mk is gone: stopped');
 }
 
 const today = () => {
@@ -167,6 +222,7 @@ function maestro(ctx: Ctx, flowPath: string, env: Record<string, string>, logNam
   const started = Date.now();
   // Maestro's JVM writes its crash dumps (hs_err_pid*.log, replay_pid*.log)
   // into its working folder: the capture folder, never the app's root.
+  fs.mkdirSync(ctx.outDir, { recursive: true });
   const r = run(ctx.p.tool.maestro, args, { cwd: ctx.outDir });
   const output = `${r.stdout}\n${r.stderr}`.trim();
   fs.mkdirSync(ctx.logDir, { recursive: true });
@@ -251,6 +307,28 @@ export function expectedVersionCode(
   return { versionCode: null, from: 'EAS numbers the builds and nothing was built on this dry run' };
 }
 
+/** The smoke results a resumed run keeps: all of them, or only the passed ones with --retry-failed. */
+export function keptSmoke(previous: FlowResult[], retryFailed: boolean): FlowResult[] {
+  return retryFailed ? previous.filter((f) => f.ok) : previous;
+}
+
+/** The old APK of --migration-from: an APK of this app, older than the one under test; its versionCode when aapt2 reads it. */
+function checkOldApk(p: Project, apk: string, expected: number | null): number | null {
+  if (!isApk(apk)) fail(`--migration-from: not an APK: ${apk}`);
+  const badging = readBadging(apk, p.tool.aapt);
+  if (!badging) {
+    warn(`--migration-from: cannot read ${path.basename(apk)} (no aapt2): its package and versionCode are not checked`);
+    return null;
+  }
+  if (badging.androidPackage !== p.config.androidPackage) {
+    fail(`--migration-from: ${path.basename(apk)} is ${badging.androidPackage}, not ${p.config.androidPackage}`);
+  }
+  if (expected !== null && badging.versionCode >= expected) {
+    fail(`--migration-from: ${path.basename(apk)} has versionCode ${badging.versionCode}, not older than the APK under test (${expected})`);
+  }
+  return badging.versionCode;
+}
+
 export async function qaDevice(args: string[]): Promise<void> {
   const o = parseQaArgs(args);
   const p = openProject({ dryRun: o.dryRun, requireDryRunInFixture: false });
@@ -269,6 +347,13 @@ export async function qaDevice(args: string[]): Promise<void> {
   );
   const langFlow = config.languages.method === 'flow' ? path.join(maestroDir, config.languages.flow ?? '') : null;
   if (langFlow && !fs.existsSync(langFlow)) fail(`Language flow missing: ${config.maestroDir}/${config.languages.flow}`);
+  const migrationApk = o.migrationFrom ? path.resolve(o.migrationFrom) : null;
+  const migrationFlows = { seed: path.join(maestroDir, MIGRATION_FLOWS.seed), verify: path.join(maestroDir, MIGRATION_FLOWS.verify) };
+  if (migrationApk) {
+    for (const f of Object.values(MIGRATION_FLOWS)) {
+      if (!fs.existsSync(path.join(maestroDir, f))) fail(`--migration-from needs ${config.maestroDir}/${f}`);
+    }
+  }
 
   // --- The plan, first -----------------------------------------------------
   let plan = buildPlan(config.screens, config.modes, config.languages.codes, config.fontScales);
@@ -296,15 +381,53 @@ export async function qaDevice(args: string[]): Promise<void> {
   // --- Local build, before any emulator runs (they would share the RAM) -----
   let localApk: string | null = null;
   if (o.localBuild) {
-    const built = localBuild(p, config.easProfiles.qa);
+    const built = await localBuild(p, config.easProfiles.qa);
     localApk = built.built || p.dryRun ? built.apk : null;
   }
+
+  // --- From here a guard cleans up if mk (or what started it) is killed -----
+  guard = startGuard(p, { serial: null, ownsEmulator: false, keepEmulator: o.keepEmulator });
+  try {
+    await runOnDevice({ p, o, smoke, screenFiles, langFlow, migrationApk, migrationFlows, plan, previous, outDir, localApk, maestroDir });
+  } finally {
+    guard.stop();
+    guard = null;
+  }
+}
+
+interface RunInput {
+  p: Project;
+  o: QaOptions;
+  smoke: string[];
+  screenFiles: Map<string, string>;
+  langFlow: string | null;
+  migrationApk: string | null;
+  migrationFlows: { seed: string; verify: string };
+  plan: ReturnType<typeof buildPlan>;
+  previous: QaRun | null;
+  outDir: string;
+  localApk: string | null;
+  maestroDir: string;
+}
+
+async function runOnDevice(input: RunInput): Promise<void> {
+  const { p, o, smoke, screenFiles, langFlow, migrationApk, migrationFlows, previous, outDir, localApk, maestroDir } = input;
+  const { config, app } = p;
+  let plan = input.plan;
+  const g = guard;
+
+  /** Bench problems (rendering, saturation): shown on top of the report. */
+  const warnings: string[] = [...(previous?.warnings ?? [])];
+  const benchWarning = (text: string) => {
+    if (!warnings.includes(text)) warnings.push(text);
+  };
 
   // --- Device --------------------------------------------------------------
   let serial: string;
   let ownsEmulator = false;
   /** The emulator booted and nothing ran on it yet: no need to restart it. */
   let freshBoot = false;
+  let firstBoot: EmulatorReady | null = null;
   if (o.emulator) {
     const physical = listDevices(p.tool.adb).ready.filter((d) => !isEmulatorSerial(d));
     if (physical.length) {
@@ -314,10 +437,13 @@ export async function qaDevice(args: string[]): Promise<void> {
       );
     }
     const ready = await ensureEmulator(p);
+    firstBoot = ready;
     ownsEmulator = ready.started;
     freshBoot = ready.started;
+    if (ready.softwareRendering) benchWarning(ready.softwareRendering);
     serial = p.dryRun && listDevices(p.tool.adb).ready.length === 0 ? ready.serial : requireOneDevice(p.tool.adb);
   } else serial = requireOneDevice(p.tool.adb);
+  g?.update({ serial, ownsEmulator });
   const device = deviceInfo(p.tool.adb, serial);
   info(`Device: ${device.manufacturer} ${device.model}, Android ${device.androidVersion} (API ${device.sdk}), ${serial}`);
 
@@ -346,15 +472,17 @@ export async function qaDevice(args: string[]): Promise<void> {
   // --- Expected versionCode -------------------------------------------------
   const expected = expectedVersionCode(p, o, { apk, builtVc, previous });
   if (expected.versionCode !== null) info(`Expected versionCode ${expected.versionCode} (${expected.from})`);
+  const oldVc = migrationApk ? checkOldApk(p, migrationApk, expected.versionCode) : null;
 
-  // --- Smoke flows still to run; those that wipe the app's data ask first --
-  const smokeDone = new Set((previous?.smoke ?? []).map((f) => f.flow));
+  // --- Smoke flows still to run; what wipes the app's data asks first -----
+  const kept = keptSmoke(previous?.smoke ?? [], o.retryFailed);
+  const smokeDone = new Set(kept.map((f) => f.flow));
   const flowName = (file: string) => path.relative(maestroDir, file).replace(/\\/g, '/');
   const smokeToRun = smoke.filter((f) => !smokeDone.has(flowName(f)));
-  const wipes = smokeToRun.filter((f) => /\bclearState\b/.test(fs.readFileSync(f, 'utf8')));
+  const wipes = smokeToRun.filter((f) => /\bclearState\b/.test(fs.readFileSync(f, 'utf8'))).map((f) => path.basename(f));
+  if (migrationApk) wipes.unshift(`--migration-from (uninstalls ${config.appName})`);
   if (wipes.length) {
-    const names = wipes.map((f) => path.basename(f)).join(', ');
-    const question = `${names} CLEAR ${config.appName}'s data on ${device.model} (${serial}). Continue?`;
+    const question = `${wipes.join(', ')} CLEAR ${config.appName}'s data on ${device.model} (${serial}). Continue?`;
     if (p.dryRun) detail(`[dry run] would ask: ${question}`);
     else if (!o.yes && !(await confirm(question))) fail('Stopped: nothing installed or changed.');
   }
@@ -362,20 +490,6 @@ export async function qaDevice(args: string[]): Promise<void> {
   // --- Maestro runs a killed mk left behind on this device -----------------
   const leftovers = killLeftoverMaestro(p, serial);
   if (leftovers) warn(`Stopped ${leftovers} Maestro process(es) left on ${serial} by an earlier run`);
-
-  // --- Install and versionCode ---------------------------------------------
-  if (apk) {
-    info(`Installing ${path.basename(apk)} on ${serial} (adb install -r keeps the data)`);
-    if (act(p.dryRun, p.tool.adb, ['-s', serial, 'install', '-r', apk]).status !== 0) fail('adb install failed');
-  }
-  const installed = installedVersionCode(p.tool.adb, serial, config.androidPackage);
-  if (expected.versionCode === null) {
-    warn(`Installed versionCode is ${installed ?? 'none'}; the expected one is unknown (${expected.from}). A real run knows it.`);
-  } else if (installed !== expected.versionCode) {
-    const message = `Installed versionCode is ${installed ?? 'none'}, ${expected.from} says ${expected.versionCode}.`;
-    if (p.dryRun) warn(`${message} (dry run: nothing was installed; a real run stops here)`);
-    else fail(`${message} Wrong build on the device: stopped before testing.`);
-  } else info(`Installed versionCode ${installed} = ${expected.from}`);
 
   // --- Languages -----------------------------------------------------------
   const notes: string[] = [];
@@ -390,29 +504,39 @@ export async function qaDevice(args: string[]): Promise<void> {
     info(`Screenshots: ${plan.summary}`);
   }
 
+  // --- Settings to restore: the phone's own, or the emulator's known state ---
+  const appLocalesKnown = method === 'app-locale' && languages[0] !== 'current';
+  const saved: SavedSettings =
+    previous?.saved ??
+    (o.emulator
+      ? { night: KNOWN_STATE.night, fontScale: KNOWN_STATE.fontScale, appLocales: appLocalesKnown ? '' : null, animations: [...KNOWN_STATE.animations] }
+      : {
+          night: getNightMode(p.tool.adb, serial),
+          fontScale: getFontScale(p.tool.adb, serial),
+          appLocales: appLocalesKnown ? getAppLocales(p.tool.adb, serial, config.androidPackage) : null,
+          animations: getAnimationScales(p.tool.adb, serial),
+        });
+  info(
+    `${previous?.saved ? 'Device settings to restore (from the first run)' : o.emulator ? 'Emulator settings at the end (known state)' : 'Saved device settings'}: ` +
+      `night mode ${saved.night}, font_scale ${saved.fontScale}` +
+      (saved.animations ? `, animations ${saved.animations.join('/')}` : '') +
+      (saved.appLocales !== null ? `, app language ${saved.appLocales || 'system'}` : ''),
+  );
+
   // --- The run, written after every step -----------------------------------
   const ctx: Ctx = { p, serial, device, maestroDir, outDir, logDir: path.join(outDir, 'logs') };
   const done = new Map((previous?.shots ?? []).filter((s) => s.file).map((s) => [shotKey(s.screen, s), s]));
   const shots: Shot[] = plan.batches.flatMap((b) =>
     b.screens.map((screen) => done.get(shotKey(screen, b)) ?? { screen, mode: b.mode, lang: b.lang, scale: b.scale }),
   );
-  const saved: SavedSettings =
-    previous?.saved ?? {
-      night: getNightMode(p.tool.adb, serial),
-      fontScale: getFontScale(p.tool.adb, serial),
-      appLocales: method === 'app-locale' && languages[0] !== 'current' ? getAppLocales(p.tool.adb, serial, config.androidPackage) : null,
-    };
-  info(
-    `${previous?.saved ? 'Device settings to restore (from the first run)' : 'Saved device settings'}: night mode ${saved.night}, font_scale ${saved.fontScale}` +
-      (saved.appLocales !== null ? `, app language ${saved.appLocales || 'system'}` : ''),
-  );
+  const retried = (previous?.smoke.length ?? 0) - kept.length;
   const run_: QaRun = {
     appName: config.appName,
     androidPackage: config.androidPackage,
     version: app.version,
     versionCode: expected.versionCode,
     versionCodeFrom: expected.from,
-    installedVersionCode: installed,
+    installedVersionCode: previous?.installedVersionCode ?? null,
     apk: apkLabel,
     device,
     startedAt: previous?.startedAt ?? new Date().toISOString(),
@@ -420,9 +544,15 @@ export async function qaDevice(args: string[]): Promise<void> {
     outDir,
     plan: plan.summary,
     saved,
-    smoke: [...(previous?.smoke ?? [])],
+    smoke: [...kept],
     shots,
-    notes: [...(previous?.notes ?? []), ...(previous ? [`Resumed ${new Date().toISOString()}`] : []), ...notes],
+    notes: [
+      ...(previous?.notes ?? []),
+      ...(previous ? [`Resumed ${new Date().toISOString()}${retried ? `: ${retried} failed smoke flow(s) run again (--retry-failed)` : ''}`] : []),
+      ...notes,
+    ],
+    warnings,
+    ...(previous?.migration ? { migration: previous.migration } : {}),
   };
   const persist = () => {
     if (p.dryRun) return;
@@ -437,10 +567,26 @@ export async function qaDevice(args: string[]): Promise<void> {
   };
   persist();
 
-  const anrCheck = () => {
-    const n = dismissForeignAnr(p.dryRun, p.tool.adb, ctx.serial, config.androidPackage);
-    if (n) note(n);
+  /** Android's own ANR dialogs seen in this run (EMULATOR_SATURATED_AFTER). */
+  let systemAnrs = 0;
+  const onAnr = (a: AnrDialog | null, during = '') => {
+    if (!a) return;
+    note(`${a.note}${during}`);
+    if (!a.system) return;
+    systemAnrs++;
+    if (systemAnrs > EMULATOR_SATURATED_AFTER) {
+      const why =
+        `${o.emulator ? 'Emulator' : 'Device'} saturated: Android's system process stopped responding ${systemAnrs} times ` +
+        `("Process system isn't responding"). The run stopped: every later flow would fail on the device, not on the app. ` +
+        (o.emulator
+          ? 'Free host memory (close Brave, Android Studio), check the GPU mode (no SwiftShader), then continue with --resume.'
+          : 'Restart the phone, then continue with --resume.');
+      benchWarning(why);
+      throw new KitError(why);
+    }
   };
+  const anrCheck = () => onAnr(dismissForeignAnr(p.dryRun, p.tool.adb, ctx.serial, config.androidPackage));
+  if (firstBoot?.anr) onAnr(firstBoot.anr, ' (after the boot)');
 
   const setLanguage = (lang: string) => {
     if (lang === 'current') return;
@@ -453,10 +599,18 @@ export async function qaDevice(args: string[]): Promise<void> {
       if (!r.ok) throw new KitError(`Language flow failed for ${lang}: ${r.error ?? ''}`);
     }
   };
+  const setNight = (on: boolean) => shellAct(p.dryRun, p.tool.adb, ctx.serial, ['cmd', 'uimode', 'night', on ? 'yes' : 'no']);
   const applySetting = (s: Setting) => {
-    shellAct(p.dryRun, p.tool.adb, ctx.serial, ['cmd', 'uimode', 'night', s.mode === 'dark' ? 'yes' : 'no']);
+    setNight(s.mode === 'dark');
     shellAct(p.dryRun, p.tool.adb, ctx.serial, setFontScaleArgs(s.scale.toFixed(2).replace(/0$/, '')));
     setLanguage(s.lang);
+  };
+  /** Step 4: whatever an earlier run (or the user) left, every run starts from the same device state. */
+  const knownState = () => {
+    info(`Known state: night mode ${KNOWN_STATE.night}, font_scale ${KNOWN_STATE.fontScale}, animations off`);
+    setNight(false);
+    shellAct(p.dryRun, p.tool.adb, ctx.serial, setFontScaleArgs(KNOWN_STATE.fontScale));
+    ANIMATION_SETTINGS.forEach((key, i) => shellAct(p.dryRun, p.tool.adb, ctx.serial, setAnimationArgs(key, KNOWN_STATE.animations[i] ?? '0')));
   };
   /**
    * After a boot (ensureEmulator waited for it and unlocked the screen),
@@ -481,6 +635,12 @@ export async function qaDevice(args: string[]): Promise<void> {
     ctx.serial = ready.serial;
     ownsEmulator = true;
     freshBoot = true;
+    g?.update({ serial: ctx.serial, ownsEmulator });
+    if (ready.softwareRendering) {
+      benchWarning(ready.softwareRendering);
+      persist();
+    }
+    onAnr(ready.anr, ' (after the boot)');
     healthCheck();
   };
 
@@ -499,14 +659,14 @@ export async function qaDevice(args: string[]): Promise<void> {
       const logName = attempt === 1 ? `screen-${name}` : `screen-${name}-batch-retry`;
       let r = maestro(ctx, flow, { APP_ID: config.androidPackage }, logName, name);
       freshBoot = false;
-      // A screen flow only opens a screen: run it again if another app's
+      // A screen flow only opens a screen: run it again if an
       // "isn't responding" dialog was covering it.
       if (!r.ok && !p.dryRun) {
-        const n = dismissForeignAnr(false, p.tool.adb, ctx.serial, config.androidPackage);
-        if (n?.endsWith('tapped Wait')) {
-          note(`${n} during ${name}: ran it again`);
+        const a = dismissForeignAnr(false, p.tool.adb, ctx.serial, config.androidPackage);
+        if (a?.tapped) {
+          onAnr(a, ` during ${name}: ran it again`);
           r = maestro(ctx, flow, { APP_ID: config.androidPackage }, `${logName}-retry`, name);
-        }
+        } else onAnr(a, ` during ${name}`);
       }
       if (p.dryRun) {
         detail(`[dry run, not executed] adb -s ${ctx.serial} exec-out screencap -p > ${name}.png`);
@@ -547,15 +707,87 @@ export async function qaDevice(args: string[]): Promise<void> {
     return failed;
   };
 
+  /** Step 5, first half: the old version with data on it. False when it could not be seeded. */
+  const migrationSeed = async (m: MigrationRun, oldApk: string): Promise<boolean> => {
+    info(`Migration: ${path.basename(oldApk)} first, with data, then the APK under test over it`);
+    if (act(p.dryRun, p.tool.adb, ['-s', ctx.serial, 'uninstall', config.androidPackage]).status !== 0) {
+      detail(`${config.androidPackage} was not installed`);
+    }
+    if (act(p.dryRun, p.tool.adb, ['-s', ctx.serial, 'install', oldApk]).status !== 0) fail(`adb install of ${path.basename(oldApk)} failed`);
+    const vc = installedVersionCode(p.tool.adb, ctx.serial, config.androidPackage);
+    if (!p.dryRun) info(`Old version installed: versionCode ${vc ?? 'none'}`);
+    await checkpoint();
+    anrCheck();
+    detail(`${MIGRATION_FLOWS.seed} …`);
+    m.seed = maestro(ctx, migrationFlows.seed, { APP_ID: config.androidPackage }, 'migration-seed');
+    persist();
+    if (!p.dryRun) detail(`${m.seed.ok ? 'PASS' : 'FAIL'} ${m.seed.flow} (${m.seed.seconds.toFixed(1)} s)`);
+    if (!m.seed.ok) {
+      note(`Migration: ${MIGRATION_FLOWS.seed} failed on ${path.basename(oldApk)}: the upgrade is not verified`);
+      return false;
+    }
+    return true;
+  };
+
+  /** A second Ctrl+C does not wait for the step: everything mk started goes now. */
+  let signalCount = 0;
   const onSignal = () => {
     interrupted = true;
-    warn('Stopping after this step, then restoring the device settings');
+    signalCount++;
+    if (signalCount === 1) {
+      warn('Stopping after this step, then restoring the device settings (Ctrl+C again: stop everything now)');
+      return;
+    }
+    warn('Stopping now: killing Maestro, adb and the emulator mk started; the device settings are NOT restored');
+    killChildren(p);
+    if (ownsEmulator) killEmulatorProcesses(p, config.emulator.avd);
+    g?.stop();
+    process.exit(130);
   };
   const signals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGHUP'];
   for (const s of signals) process.on(s, onSignal);
   let stopError: unknown = null;
   try {
     if (o.emulator && ownsEmulator) healthCheck();
+    knownState();
+
+    // Migration, before the install of the APK under test.
+    let seeded = false;
+    if (migrationApk) {
+      const m: MigrationRun = { from: path.basename(migrationApk), fromVersionCode: oldVc };
+      run_.migration = m;
+      seeded = await migrationSeed(m, migrationApk);
+    }
+
+    // Install and versionCode.
+    if (apk) {
+      info(`Installing ${path.basename(apk)} on ${ctx.serial} (adb install -r keeps the data)`);
+      if (act(p.dryRun, p.tool.adb, ['-s', ctx.serial, 'install', '-r', apk]).status !== 0) {
+        fail(`adb install failed${migrationApk ? ` (over ${path.basename(migrationApk)}: both must be signed with the same key)` : ''}`);
+      }
+    }
+    const installed = installedVersionCode(p.tool.adb, ctx.serial, config.androidPackage);
+    run_.installedVersionCode = installed;
+    persist();
+    if (expected.versionCode === null) {
+      warn(`Installed versionCode is ${installed ?? 'none'}; the expected one is unknown (${expected.from}). A real run knows it.`);
+    } else if (installed !== expected.versionCode) {
+      const message = `Installed versionCode is ${installed ?? 'none'}, ${expected.from} says ${expected.versionCode}.`;
+      if (p.dryRun) warn(`${message} (dry run: nothing was installed; a real run stops here)`);
+      else fail(`${message} Wrong build on the device: stopped before testing.`);
+    } else info(`Installed versionCode ${installed} = ${expected.from}`);
+
+    // Migration, after the upgrade: the data must still be there.
+    if (run_.migration && seeded) {
+      await checkpoint();
+      anrCheck();
+      detail(`${MIGRATION_FLOWS.verify} …`);
+      const m = run_.migration;
+      m.verify = maestro(ctx, migrationFlows.verify, { APP_ID: config.androidPackage }, 'migration-verify');
+      if (!m.verify.ok && m.verify.errorLine) detail(m.verify.errorLine);
+      persist();
+      if (!p.dryRun) detail(`${m.verify.ok ? 'PASS' : 'FAIL'} ${m.verify.flow} (${m.verify.seconds.toFixed(1)} s)`);
+    }
 
     // Smoke.
     if (smokeToRun.length) info(`Maestro smoke flows (${smokeToRun.length}${smokeDone.size ? `, ${smokeDone.size} done earlier` : ''})`);
@@ -569,6 +801,8 @@ export async function qaDevice(args: string[]): Promise<void> {
       run_.smoke.push(r);
       persist();
       if (!p.dryRun) detail(`${r.ok ? 'PASS' : 'FAIL'} ${r.flow} (${r.seconds.toFixed(1)} s)`);
+      // A dialog that appeared during the flow (and probably failed it).
+      if (!r.ok && !p.dryRun) onAnr(dismissForeignAnr(false, p.tool.adb, ctx.serial, config.androidPackage), ` during ${r.flow}`);
     }
 
     // Screenshots, one batch per device setting.
@@ -592,6 +826,8 @@ export async function qaDevice(args: string[]): Promise<void> {
             `retrying the whole batch once${o.emulator ? ' after a cold restart' : ''}`,
         );
       }
+      // Dark screenshots switched night mode on: back to the known state.
+      if (batch.mode === 'dark') setNight(false);
     }
   } catch (e) {
     stopError = e;
@@ -617,13 +853,19 @@ export async function qaDevice(args: string[]): Promise<void> {
 
   const report = path.join(outDir, 'report.html');
   info(`Report: ${report}`);
+  for (const w of warnings) warn(w);
   if (o.open) run(p.tool.open, [report]);
 
   if (stopError) throw stopError;
   const smokeFailed = run_.smoke.filter((f) => !f.ok).length;
   const missing = run_.shots.filter((s) => !s.file).length;
-  if (smokeFailed || missing) fail(`QA: ${smokeFailed} smoke flow(s) failed, ${missing} screenshot(s) missing. See the report.`);
-  info('QA done: every smoke flow passed. Now review the screenshots in the report.');
+  const migrationFailed = run_.migration ? !(run_.migration.seed?.ok && run_.migration.verify?.ok) : false;
+  if (smokeFailed || missing || migrationFailed) {
+    fail(
+      `QA: ${migrationFailed ? 'the migration test failed, ' : ''}${smokeFailed} smoke flow(s) failed, ${missing} screenshot(s) missing. See the report.`,
+    );
+  }
+  info(`QA done: ${run_.migration ? 'the migration test and ' : ''}every smoke flow passed. Now review the screenshots in the report.`);
 }
 
 /** Each setting on its own: one failure does not skip the others. */
@@ -645,6 +887,13 @@ function restore(ctx: Ctx, saved: SavedSettings, r: QaRun): void {
     return shellAct(p.dryRun, p.tool.adb, serial, ['cmd', 'uimode', 'night', saved.night]);
   });
   attempt('font scale', () => shellAct(p.dryRun, p.tool.adb, serial, setFontScaleArgs(saved.fontScale)));
+  // Runs before 0.3.2 did not save them (and did not change them on a phone).
+  if (saved.animations) {
+    const values = saved.animations;
+    ANIMATION_SETTINGS.forEach((key, i) =>
+      attempt(key, () => shellAct(p.dryRun, p.tool.adb, serial, setAnimationArgs(key, values[i] ?? 'null'))),
+    );
+  }
   if (saved.appLocales !== null) {
     const locales = saved.appLocales;
     attempt('app language', () => shellAct(p.dryRun, p.tool.adb, serial, setAppLocalesArgs(p.config.androidPackage, locales)));

@@ -87,6 +87,19 @@ export function setFontScaleArgs(value: string): string[] {
   return value === 'null' ? ['settings', 'delete', 'system', 'font_scale'] : ['settings', 'put', 'system', 'font_scale', value];
 }
 
+/** The three animation scales Maestro wants at 0 (window, transition, animator). */
+export const ANIMATION_SETTINGS = ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale'] as const;
+
+/** Their current values, "null" when never set (the default, 1). */
+export function getAnimationScales(adb: string[], serial: string): string[] {
+  return ANIMATION_SETTINGS.map((key) => shell(adb, serial, ['settings', 'get', 'global', key]) || 'null');
+}
+
+/** One animation scale back to `value` ("null": deleted, the default). */
+export function setAnimationArgs(key: string, value: string): string[] {
+  return value === 'null' ? ['settings', 'delete', 'global', key] : ['settings', 'put', 'global', key, value];
+}
+
 /** Android 13+: "Locales for <pkg> for user 0 are [fr-FR]" → "fr-FR" ("" = follows the system). */
 export function getAppLocales(adb: string[], serial: string, pkg: string): string {
   const out = shell(adb, serial, ['cmd', 'locale', 'get-app-locales', pkg, '--user', 'current']);
@@ -125,19 +138,52 @@ export function waitButtonCentre(xml: string): [number, number] | null {
 }
 
 /**
- * Another app's ANR dialog (e.g. "Pixel Launcher isn't responding" after a
- * cold boot) covers the app and fails every flow: tap its Wait button. An
- * ANR of the app under test is left alone; it is a finding. Returns a note
- * for the report, or null when there was nothing to do.
+ * "Process system isn't responding": Android's own system_server, not an
+ * app. It means the device itself is starved (an emulator out of host
+ * memory, on 2026-10-23); its dialog names the process "system" (or
+ * "android").
  */
-export function dismissForeignAnr(dryRun: boolean, adb: string[], serial: string, appPackage: string): string | null {
+export const isSystemAnr = (pkg: string) => pkg === 'system' || pkg === 'android' || pkg === 'system_server';
+
+export interface AnrDialog {
+  /** The process the dialog is about. */
+  pkg: string;
+  /** Android's system process: counted by qa:device (EMULATOR_SATURATED_AFTER). */
+  system: boolean;
+  /** Wait was tapped (the dialog is gone). */
+  tapped: boolean;
+  /** For the report. */
+  note: string;
+}
+
+/**
+ * Another app's ANR dialog (e.g. "Pixel Launcher isn't responding" after a
+ * cold boot), or the system's own ("Process system isn't responding"),
+ * covers the app and fails every flow: tap its Wait button. An ANR of the
+ * app under test is left alone; it is a finding. Returns what was found, or
+ * null when there was nothing to do.
+ */
+export function dismissForeignAnr(dryRun: boolean, adb: string[], serial: string, appPackage: string): AnrDialog | null {
   if (dryRun) return null;
   const pkg = focusedAnr(adb, serial);
   if (!pkg) return null;
-  if (pkg === appPackage) return `${appPackage} itself was not responding (ANR dialog left on screen)`;
+  const system = isSystemAnr(pkg);
+  const who = system ? `Android's system process ("Process ${pkg} isn't responding")` : pkg;
+  if (pkg === appPackage) return { pkg, system, tapped: false, note: `${appPackage} itself was not responding (ANR dialog left on screen)` };
   const xml = run(adb, ['-s', serial, 'exec-out', 'uiautomator', 'dump', '/dev/tty']).stdout;
   const centre = waitButtonCentre(xml);
-  if (!centre) return `${pkg} was not responding; its dialog had no Wait button to tap`;
+  if (!centre) return { pkg, system, tapped: false, note: `${who} was not responding; its dialog had no Wait button to tap` };
   shell(adb, serial, ['input', 'tap', String(centre[0]), String(centre[1])]);
-  return `${pkg} was not responding: tapped Wait`;
+  return { pkg, system, tapped: true, note: `${who} was not responding: tapped Wait` };
 }
+
+// --- Rendering ---------------------------------------------------------------
+
+/** The GLES line of SurfaceFlinger, e.g. "Google (NVIDIA Corporation), Android Emulator OpenGL ES Translator (…)". */
+export function glesRenderer(adb: string[], serial: string): string | null {
+  const out = shell(adb, serial, ['dumpsys', 'SurfaceFlinger']);
+  return /^\s*GLES:\s*(.+)$/m.exec(out)?.[1]?.trim() ?? null;
+}
+
+/** SwiftShader (or another CPU renderer): the emulator draws in software, the memory hog of 2026-10-11. */
+export const isSoftwareRenderer = (renderer: string) => /swiftshader|llvmpipe|softpipe|software/i.test(renderer);

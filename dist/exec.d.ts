@@ -35,9 +35,16 @@ export interface RunResult {
     stderr: string;
 }
 export declare function run(argv: string[], args: string[], options?: RunOptions): RunResult;
+/**
+ * Like run() with `live`: the output is shown as it comes, and its last
+ * megabyte is also kept in stdout/stderr, to read why it failed (Gradle).
+ */
+export declare function runTee(argv: string[], args: string[], options?: Pick<RunOptions, 'cwd' | 'env'>): Promise<RunResult>;
 export declare const formatCommand: (argv: string[]) => string;
 /**
  * A command with side effects (build, upload, install, device setting).
  * In a dry run it is only printed.
  */
 export declare function act(dryRun: boolean, argv: string[], args: string[], options?: RunOptions): RunResult;
+/** act() for runTee(): in a dry run only printed. */
+export declare function actTee(dryRun: boolean, argv: string[], args: string[], options?: Pick<RunOptions, 'cwd' | 'env'>): Promise<RunResult>;

@@ -29,6 +29,6 @@ export interface LocalBuildResult {
 }
 export declare function localBuildPath(p: Project, profile: string): string;
 /** Builds `profile` locally (see the top of this file). */
-export declare function localBuild(p: Project, profile: string, options?: LocalBuildOptions): LocalBuildResult;
+export declare function localBuild(p: Project, profile: string, options?: LocalBuildOptions): Promise<LocalBuildResult>;
 /** `mk build --local --profile <name> [--dry-run]`. */
 export declare function buildCommand(args: string[]): Promise<void>;

@@ -30,10 +30,15 @@ function state() {
     boots: 0,
     // Maestro's driver on the device: ok, broken (a reinstall fixes it) or dead (nothing does).
     driver: 'ok',
+    // The -gpu mode of the last boot.
+    gpu: 'host',
+    // settings global (animation scales): key → value.
+    global: {},
   };
   if (!env.FAKE_STATE) return initial;
   if (!fs.existsSync(env.FAKE_STATE)) fs.writeFileSync(env.FAKE_STATE, JSON.stringify(initial));
-  return JSON.parse(fs.readFileSync(env.FAKE_STATE, 'utf8'));
+  // A test may have set a few keys before the first call (setState): the rest are the defaults.
+  return { ...initial, ...JSON.parse(fs.readFileSync(env.FAKE_STATE, 'utf8')) };
 }
 const save = (s) => env.FAKE_STATE && fs.writeFileSync(env.FAKE_STATE, JSON.stringify(s));
 
@@ -94,6 +99,8 @@ switch (tool) {
     if (env.MK_SIGNING_STORE_PASSWORD !== env.FAKE_STOREPASS) problems.push('wrong store password');
     if (!env.MK_SIGNING_KEY_ALIAS || !env.MK_SIGNING_KEY_PASSWORD) problems.push('no key alias / password');
     fs.appendFileSync(env.FAKE_LOG, `gradlew-env APP_ABIS=${env.APP_ABIS ?? ''} signing=${problems.length ? problems.join('; ') : 'ok'}\n`);
+    // FAKE_GRADLE_OUTPUT: what Gradle prints before it fails (mk reads the cause in it).
+    if (env.FAKE_GRADLE_OUTPUT) out(env.FAKE_GRADLE_OUTPUT);
     if (problems.length || failIf('gradle')) process.exit(3);
     fs.mkdirSync('app/build/outputs/apk/release', { recursive: true });
     fs.writeFileSync('app/build/outputs/apk/release/app-release.apk', APK);
@@ -146,6 +153,7 @@ switch (tool) {
     const s = state();
     s.emulator = args[args.indexOf('-avd') + 1];
     s.boots += 1;
+    s.gpu = args[args.indexOf('-gpu') + 1];
     // FAKE_DRIVER_BROKEN_BOOTS / FAKE_BAD_BOOTS="2,3": after those boots Maestro cannot reach the device.
     const on = (name) => (env[name] ?? '').split(',').includes(String(s.boots));
     s.driver = on('FAKE_BAD_BOOTS') ? 'dead' : on('FAKE_DRIVER_BROKEN_BOOTS') ? 'broken' : 'ok';
@@ -193,11 +201,15 @@ switch (tool) {
     }
     process.exit(1);
   }
-  case 'aapt':
+  case 'aapt': {
+    // FAKE_OLD_APK=<file name>:<versionCode>: that APK (--migration-from) has its own versionCode.
+    const [oldName, oldVc] = (env.FAKE_OLD_APK ?? ':').split(':');
+    const vc = oldName && line.includes(oldName) ? oldVc : (env.FAKE_VC ?? '15');
     out(
-      `package: name='${env.FAKE_PKG ?? 'com.example.app'}' versionCode='${env.FAKE_VC ?? '15'}' versionName='${env.FAKE_VN ?? '0.2.0'}' platformBuildVersionName='16'\n`,
+      `package: name='${env.FAKE_PKG ?? 'com.example.app'}' versionCode='${vc}' versionName='${env.FAKE_VN ?? '0.2.0'}' platformBuildVersionName='16'\n`,
     );
     break;
+  }
   case 'apksigner':
     if (env.FAKE_UNSIGNED) {
       out('DOES NOT VERIFY\n');
@@ -222,6 +234,11 @@ switch (tool) {
     if (env.FAKE_JVM_CRASH) fs.writeFileSync('hs_err_pid4242.log', '# A fatal error has been detected\n');
     const s = state();
     // FAKE_ANR_DURING=<flow>: the launcher stops responding during that flow (once).
+    // FAKE_SYSTEM_ANR: Android's system process stops responding during every flow.
+    if (env.FAKE_SYSTEM_ANR) {
+      s.anr = 'system';
+      save(s);
+    }
     if (env.FAKE_ANR_DURING === name && !s.anrShown) {
       s.anr = 'com.google.android.apps.nexuslauncher';
       s.anrShown = true;
@@ -255,7 +272,10 @@ switch (tool) {
       if (rest[1] === 'dev.mobile.maestro' && s.driver === 'broken') s.driver = 'ok';
       save(s);
     } else if (rest[0] === 'install') {
-      s.versionCode = env.FAKE_APK_VC ?? '16';
+      // FAKE_OLD_APK: an APK of that name installs that versionCode (the --migration-from one).
+      const [oldName, oldVc] = (env.FAKE_OLD_APK ?? ':').split(':');
+      s.versionCode = oldName && rest[rest.length - 1].endsWith(oldName) ? oldVc : (env.FAKE_APK_VC ?? '16');
+      s.installs = [...(s.installs ?? []), rest[rest.length - 1].replace(/\\/g, '/').split('/').pop()];
       save(s);
     } else if (rest[0] === 'exec-out' && rest[1] === 'uiautomator') {
       if (s.anr) {
@@ -265,6 +285,22 @@ switch (tool) {
     } else if (cmd === 'shell input tap 540 1368') {
       s.anr = '';
       save(s);
+    } else if (cmd === 'shell dumpsys SurfaceFlinger') {
+      // FAKE_SOFTWARE_RENDER: SwiftShader whatever -gpu said (a host GPU that fell back).
+      const software = env.FAKE_SOFTWARE_RENDER || /swiftshader/.test(s.gpu);
+      out('Build configuration: [sf PRESENT_TIME_OFFSET=0]\n');
+      out(software
+        ? 'GLES: Google (Google Inc.), Android Emulator OpenGL ES Translator (Google SwiftShader), OpenGL ES 3.0\n'
+        : 'GLES: Google (NVIDIA Corporation), Android Emulator OpenGL ES Translator (NVIDIA GeForce GTX 1060/PCIe/SSE2), OpenGL ES 3.0\n');
+    } else if (rest[1] === 'settings' && rest[3] === 'global') {
+      // settings get|put|delete global <key> [value]
+      s.global = s.global ?? {};
+      if (rest[2] === 'get') out(`${s.global[rest[4]] ?? 'null'}\n`);
+      else {
+        if (rest[2] === 'put') s.global[rest[4]] = rest[5];
+        else delete s.global[rest[4]];
+        save(s);
+      }
     } else if (cmd === 'shell dumpsys window windows') {
       out(s.anr ? `  mCurrentFocus=Window{42f u0 Application Not Responding: ${s.anr}}\n` : '  mCurrentFocus=Window{a1e u0 launcher}\n');
     } else if (rest[0] === 'exec-out') {

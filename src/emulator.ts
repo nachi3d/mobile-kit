@@ -10,13 +10,15 @@
 //      -wipe-data);
 //   4. waits for sys.boot_completed=1, unlocks the screen, keeps it on and
 //      turns animations off (stable Maestro runs);
-//   5. prints its adb serial.
+//   5. reads the renderer (SurfaceFlinger's GLES line) and warns when it
+//      is SwiftShader although a GPU mode was asked for;
+//   6. prints its adb serial.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { dismissForeignAnr, listDevices, shell } from './android.js';
+import { dismissForeignAnr, glesRenderer, isSoftwareRenderer, listDevices, shell, type AnrDialog } from './android.js';
 import { GPU_FALLBACK, type EmulatorConfig, type GpuMode } from './config.js';
 import { act, formatCommand, run } from './exec.js';
 import { killEmulatorProcesses } from './host.js';
@@ -114,6 +116,24 @@ export interface EmulatorReady {
   serial: string;
   /** This call started it (it was not already running). */
   started: boolean;
+  /** SurfaceFlinger's GLES renderer, or null when it cannot be read (dry run). */
+  renderer: string | null;
+  /**
+   * The emulator renders in software (SwiftShader) although the config asks
+   * for a GPU mode (host…): it will use far more host memory. Null when unknown.
+   */
+  softwareRendering: string | null;
+  /** An ANR dialog dismissed (or not) after the boot. */
+  anr: AnrDialog | null;
+}
+
+/** Why the rendering is a problem: software although `requested` is a GPU mode; null when fine. */
+export function softwareRenderingWarning(requested: GpuMode, renderer: string | null): string | null {
+  if (!renderer || !isSoftwareRenderer(renderer) || requested === GPU_FALLBACK || requested === 'guest') return null;
+  return (
+    `SOFTWARE RENDERING: gpu=${requested} was requested but the emulator renders with SwiftShader (${renderer}). ` +
+    'It uses several GB more host memory and slows every flow. Check the graphics driver and `emulator -accel-check`, close other GPU users, then restart the emulator.'
+  );
 }
 
 /** Emulator command-line arguments. */
@@ -226,14 +246,19 @@ export async function ensureEmulator(p: Project, o: EmulatorStart = {}): Promise
     ['settings', 'put', 'global', 'animator_duration_scale', '0'],
   ];
   for (const args of settings) act(p.dryRun, p.tool.adb, ['-s', serial, 'shell', ...args]);
+  let anr: AnrDialog | null = null;
   if (started && !p.dryRun) {
     detail(`Letting the system settle for ${settleMs() / 1000} s`);
     await sleep(settleMs());
-    const anr = dismissForeignAnr(false, p.tool.adb, serial, p.config.androidPackage);
-    if (anr) warn(anr);
+    anr = dismissForeignAnr(false, p.tool.adb, serial, p.config.androidPackage);
+    if (anr) warn(anr.note);
   }
+  const renderer = p.dryRun ? null : glesRenderer(p.tool.adb, serial);
+  const softwareRendering = softwareRenderingWarning(e.gpu, renderer);
+  if (renderer) detail(`Renderer: ${renderer}`);
+  if (softwareRendering) warn(softwareRendering);
   info(`Emulator ready: ${serial}`);
-  return { serial, started };
+  return { serial, started, renderer, softwareRendering, anr };
 }
 
 export function parseEmulatorArgs(args: string[]): { wipe: boolean; dryRun: boolean } {

@@ -5,7 +5,8 @@
 // can be published itself:
 //   1. checks: the profile in eas.json, app.json pins its versionCode, the
 //      production key in MK_KEYSTORE_DIR (certificate = signingSha1), android/
-//      gitignored, at least MIN_BUILD_FREE_MB of free RAM;
+//      gitignored, JAVA_HOME a JDK 17 (bin/javac, version 17), at least
+//      MIN_BUILD_FREE_MB of free RAM;
 //   2. `expo prebuild --platform android --clean --no-install` with the
 //      profile's env (eas.json, `extends` applied): android/ is generated;
 //      package.json and app.json are put back byte for byte if prebuild
@@ -14,7 +15,8 @@
 //      the key from MK_SIGNING_* environment variables, Gradle gets 3 GB and
 //      2 workers;
 //   4. `gradlew assembleRelease --no-daemon --max-workers=2` with the
-//      passwords in its environment only;
+//      passwords in its environment only; on failure its output is read
+//      for the probable cause (no javac, wrong JDK, out of memory, other);
 //   5. the APK goes to dist/<apkName>-<version>-<profile>.apk (or `dest`),
 //      android/ is deleted, and the APK is verified: package, versionName,
 //      versionCode, signing certificate SHA-1. A wrong APK is deleted.
@@ -25,11 +27,13 @@ import path from 'node:path';
 import { verifyApk } from '../apk.js';
 import { normalizeSha1 } from '../config.js';
 import { easProfileEnv } from '../eas.js';
-import { act, run } from '../exec.js';
+import { act, actTee, run } from '../exec.js';
 import { hostMemory } from '../host.js';
+import { jdkProblem } from '../java.js';
 import { loadSigning } from '../keystore.js';
 import { detail, fail, info, warn } from '../log.js';
 import { openProject } from '../project.js';
+import { gradleFailure } from './gradle-failure.js';
 export const LOCAL_BUILD_USAGE = 'Usage: mk build --local --profile <eas profile> [--dry-run]';
 /** Below this much free RAM a local build is not started (Gradle 3 GB + Metro + the system). */
 export const MIN_BUILD_FREE_MB = 4096;
@@ -80,6 +84,13 @@ export function patchGradleProperties(text) {
 const gitStatus = (root) => run(['git'], ['-C', root, 'status', '--porcelain']).stdout;
 /** Files prebuild may rewrite (e.g. package.json scripts → expo run:android): put back afterwards. */
 const RESTORED = ['package.json', 'app.json'];
+/** JAVA_HOME must be a JDK 17: a JRE (no javac) failed Gradle after 24 minutes. */
+function jdkCheck() {
+    const problem = jdkProblem();
+    if (problem)
+        fail(problem);
+    info(`JDK: ${process.env.JAVA_HOME ?? ''}`);
+}
 function freeRamCheck(p) {
     const mem = hostMemory(p);
     if (!mem) {
@@ -96,7 +107,7 @@ export function localBuildPath(p, profile) {
     return path.join(p.root, 'dist', `${p.config.apkName}-${p.app.version}-${profile}.apk`);
 }
 /** Builds `profile` locally (see the top of this file). */
-export function localBuild(p, profile, options = {}) {
+export async function localBuild(p, profile, options = {}) {
     const dest = options.dest ?? localBuildPath(p, profile);
     const rel = path.relative(p.root, dest).replace(/\\/g, '/');
     info(`Local build of profile ${profile} → ${rel}`);
@@ -111,6 +122,7 @@ export function localBuild(p, profile, options = {}) {
     if (run(['git'], ['-C', p.root, 'check-ignore', '-q', 'android/app/build.gradle']).status !== 0) {
         fail('android/ is not gitignored in this app: add "/android" to .gitignore (prebuild generates it).');
     }
+    jdkCheck();
     freeRamCheck(p);
     const envText = Object.keys(profileEnv).length ? Object.entries(profileEnv).map(([k, v]) => `${k}=${v}`).join(' ') : 'none';
     info(`Profile env (eas.json): ${envText}`);
@@ -154,9 +166,8 @@ export function localBuild(p, profile, options = {}) {
         const wrapper = path.join(android, process.platform === 'win32' ? 'gradlew.bat' : 'gradlew');
         const gradlew = p.tool.gradlew.length > 0 ? p.tool.gradlew : [wrapper];
         info('Gradle assembleRelease (about 10–20 minutes; keep the PC otherwise idle)');
-        const gradle = act(p.dryRun, gradlew, GRADLE_ARGS, {
+        const gradle = await actTee(p.dryRun, gradlew, GRADLE_ARGS, {
             cwd: android,
-            live: true,
             env: {
                 ...buildEnv,
                 GRADLE_OPTS: '-Xmx512m',
@@ -166,8 +177,12 @@ export function localBuild(p, profile, options = {}) {
                 [SIGNING_ENV.keyPassword]: signing.keyPassword,
             },
         });
-        if (gradle.status !== 0)
-            fail('Gradle build failed (see above). Out of memory? Close other programs and retry.');
+        if (gradle.status !== 0) {
+            const why = gradleFailure(`${gradle.stdout}
+${gradle.stderr}`);
+            fail(`Gradle build failed (exit ${gradle.status}). Probable cause: ${why.cause}${why.evidence && why.kind !== 'other' ? `
+    Seen in the output: ${why.evidence}` : ''}`);
+        }
         if (!p.dryRun) {
             if (!fs.existsSync(out))
                 fail(`Gradle built no ${path.relative(p.root, out)}`);
@@ -229,7 +244,7 @@ export async function buildCommand(args) {
     if (!profile)
         fail(`--profile is required. ${LOCAL_BUILD_USAGE}`);
     const p = openProject({ dryRun, requireDryRunInFixture: false });
-    const r = localBuild(p, profile);
+    const r = await localBuild(p, profile);
     if (r.built)
         info(`Ready: ${path.relative(p.root, r.apk).replace(/\\/g, '/')}`);
 }

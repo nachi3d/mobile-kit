@@ -5,7 +5,8 @@ device QA with screenshots, and APK releases to Cloudflare R2. Each app
 keeps only a `mobile-kit.config.json` and its Maestro flows.
 
 ```
-mk qa:device [--apk <path>] [--skip-build] [--local-build] [--emulator] [--resume <dir>] [--keep-emulator] [--yes] [--no-open] [--dry-run]
+mk qa:device [--apk <path>] [--skip-build] [--local-build] [--emulator] [--resume <dir> [--retry-failed]]
+             [--migration-from <old apk>] [--keep-emulator] [--yes] [--no-open] [--dry-run]
 mk emulator [--wipe] [--dry-run]
 mk release:build <version> [--local] [--dry-run]
 mk release:promote <version> [--dry-run]
@@ -51,12 +52,19 @@ On the one connected phone or emulator:
    test phone, not a phone with real data.
 5. **Leftovers.** Maestro processes that a killed run left on the device
    are stopped.
-6. **Install.** Runs `adb install -r`, which keeps the data. The installed
+6. **Known state.** Before any flow the device is set to night mode `no`,
+   `font_scale` 1.0 and animations off (`window_animation_scale`,
+   `transition_animation_scale`, `animator_duration_scale` = 0), whatever
+   an earlier run or the user left. Dark screenshot batches turn night mode
+   on, and back off when they are done.
+7. **Migration test** (optional, `--migration-from <old apk>`): see
+   [below](#--migration-from-old-apk).
+8. **Install.** Runs `adb install -r`, which keeps the data. The installed
    versionCode (`dumpsys package`) must equal the expected one, otherwise
    it stops before testing (see [versionCode](#versioncode)).
-7. **Smoke.** Runs every `<maestroDir>/smoke/*.yaml` in name order, one
+9. **Smoke.** Runs every `<maestroDir>/smoke/*.yaml` in name order, one
    after the other. Files starting with `_` are subflows and are skipped.
-8. **Screenshots, in batches.** One batch per device setting: night mode
+10. **Screenshots, in batches.** One batch per device setting: night mode
    (`cmd uimode night`), font scale (`settings put system font_scale`) and
    language. Each screen is captured with `adb exec-out screencap`. With
    `--emulator`:
@@ -79,14 +87,25 @@ On the one connected phone or emulator:
    before they are marked failed. That many failures at once mean
    Maestro lost the device, not that the screens are broken. A screenshot
    the first attempt took is kept if the retry fails.
-9. **"Isn't responding" dialogs.** Before each flow, mk looks for another
-   app's ANR dialog (e.g. "Pixel Launcher isn't responding" after a cold
-   boot) and taps its **Wait** button. A screen flow that failed because
-   such a dialog appeared runs once more. An ANR of the app under test is
-   left alone and reported: it is a finding.
-10. **Restore.** Night mode, font scale and app language go back to what
-    they were before the first run, also after a failure or Ctrl+C.
-11. **Report.** `.images/captures/<YYYY-MM-DD>-v<version>/` holds the PNGs,
+11. **"Isn't responding" dialogs.** Before each flow, and after a flow
+    that failed, mk looks for another app's ANR dialog (e.g. "Pixel
+    Launcher isn't responding" after a cold boot) and taps its **Wait**
+    button. A screen flow that failed because such a dialog appeared runs
+    once more. An ANR of the app under test is left alone and reported:
+    it is a finding.
+    - **"Process system isn't responding"** is Android's own system
+      process: the device itself is starved (on 2026-10-23, an emulator
+      out of host memory). mk taps Wait and counts them. After the 4th
+      (more than 3) it stops the run cleanly, restores the device, and
+      the report says **"Emulator saturated"** on top: every later flow
+      would have failed because of the device, not the app. Free host
+      memory, check the GPU mode, then continue with `--resume`.
+12. **Restore.** Night mode, font scale, animations and app language go
+    back, also after a failure or Ctrl+C. On a phone: to what they were
+    before the first run. With `--emulator`: to the known state of step
+    6 (mk's AVD has no settings of its own to keep), so a killed run's
+    1.3× or dark mode never carries over.
+13. **Report.** `.images/captures/<YYYY-MM-DD>-v<version>/` holds the PNGs,
     `logs/`, `results.json` and `report.html`.
     - Both files are **rewritten after every flow and capture**, so a run
       that is killed still leaves a report. Screenshots not taken show as
@@ -101,25 +120,90 @@ On the one connected phone or emulator:
       (`~/.maestro/tests/<timestamp>`: `maestro.log`, screenshots) is
       copied into `debug/<screen>_<mode>_<lang>_<scale>x/` (smoke flows:
       `debug/smoke-<flow>/`) and linked from the report.
-12. **Clean exit.** Maestro processes still running are stopped. If mk
+    - **Bench warnings** on top of the page, in red: software rendering
+      (below) and a saturated emulator. They are printed again in the
+      console at the end.
+14. **Clean exit.** Maestro processes still running are stopped. If mk
     started or restarted the emulator, it stops it (`--keep-emulator`
     leaves it running). Maestro runs in the capture folder, so JVM crash
     dumps (`hs_err_pid*.log`) land there, never in the app.
 
-It exits non-zero if any smoke flow failed or any screenshot is missing.
+It exits non-zero if any smoke flow failed, any screenshot is missing, or
+the migration test failed.
+
+**Software rendering.** After each boot mk reads the renderer
+(`dumpsys SurfaceFlinger`, the `GLES:` line). If it is SwiftShader while
+`emulator.gpu` asks for a GPU mode (`host`, the default), it warns in the
+console and on top of report.html: software rendering grew the emulator
+past 14 GB of host memory on 2026-10-11. It happens when the GPU mode
+does not boot (mk then retries with `swiftshader_indirect`) or when the
+emulator falls back by itself (driver, remote desktop, another GPU user).
+
+**Stopping a run.**
+- **Ctrl+C** once: the run stops after the current step, restores the
+  device, writes the report, stops the emulator it started. Ctrl+C
+  **again**: mk kills Maestro, adb and the emulator it started at once
+  and exits (130), without restoring the settings (the next run's known
+  state fixes them).
+- **mk or its terminal killed** (closing the window, `taskkill`, Claude
+  Code's memory reaper killing the shell that runs it): a **guard**
+  process cleans up. mk starts it at the beginning of the run, detached
+  (it is nobody's child, so killing mk's process tree does not kill it),
+  with a state file in the temp folder (`mk-guard-<pid>.json`: mk's pid,
+  the device, whether mk started the emulator). Every 2 s:
+  - mk finished normally (it removed the state file): the guard exits;
+  - mk is dead: the guard kills every process mk started (Maestro, adb
+    sessions, the emulator), the Maestro and adb processes still talking
+    to the device, and, if mk started the emulator, stops it (`adb emu
+    kill`, then its processes); `--keep-emulator` keeps it running;
+  - a process mk was started by is dead (the shell, npm, the terminal):
+    mk is an orphan. The guard kills mk's children, so the current step
+    returns at once; mk sees it at its next checkpoint, restores the
+    device, writes the report and exits. If mk is still alive 90 s later,
+    the guard kills it and cleans up as above.
+
+  `MK_GUARD_LOG=<file>` makes the guard write what it does there.
 
 **`--resume <capture folder>`** continues a run that stopped (killed,
-Ctrl+C, out of memory):
+Ctrl+C, out of memory, saturated):
 - It builds and installs nothing.
 - It skips the smoke flows the first run recorded, keeps its screenshots
-  and takes only the missing ones.
+  and takes only the missing ones. **`--retry-failed`** also runs again
+  the smoke flows that failed (after an environment problem, for
+  example); without it they stay failed.
 - It restores the device settings the **first** run saved, even if the
   killed run left dark mode or 1.3× on.
 - It refuses a folder of another version or versionCode (app.json's, or,
   with EAS numbering, the one installed on the device).
 
 Example: `npm run qa:device -- --emulator --yes --resume
-.images/captures/2026-10-11-v0.3.0`.
+.images/captures/2026-10-11-v0.3.0 --retry-failed`.
+
+### `--migration-from <old apk>`
+
+Checks that an update keeps the data, on the device, before the smoke
+flows (which wipe it). It needs two flows in the app:
+`<maestroDir>/migration/seed.yaml` (creates data **on the old version's
+UI**) and `<maestroDir>/migration/verify-upgrade.yaml` (checks it on the
+new one).
+
+1. Asks first: the app is **uninstalled**, so its data goes (`--yes`
+   answers).
+2. The old APK must be this app's package and, when aapt2 can read it,
+   have a lower versionCode than the APK under test.
+3. `adb uninstall <package>`, `adb install <old apk>`, then `seed.yaml`.
+4. `adb install -r <APK under test>` over it (both must be signed with the
+   same key) and the usual versionCode check.
+5. `verify-upgrade.yaml`. If the seed failed, it is skipped and the
+   report says the upgrade is not verified.
+6. Then the smoke flows and screenshots as usual.
+
+The report gets a "Migration from <apk> (versionCode N)" table and a
+Migration passed/FAILED badge; a failure makes mk exit non-zero. Not with
+`--skip-build` or `--resume` (it needs the APK under test to install over
+the old one). Where the old APK comes from is up to the app (its
+`dist/`, or downloaded from the public downloads URL); mk never fetches
+it.
 
 **Languages** (`languages.method`):
 
@@ -153,7 +237,10 @@ The local emulator for QA, idempotent:
    sets the window, transition and animator scales to 0 so Maestro runs
    are stable. After a boot it waits 20 s for the system to settle, then
    taps Wait on any "isn't responding" dialog.
-5. Prints its adb serial (`emulator-5554`).
+5. Prints the renderer (`dumpsys SurfaceFlinger`, `GLES:` line) and
+   warns `SOFTWARE RENDERING` when it is SwiftShader although `gpu` asks
+   for a GPU mode (see [Software rendering](#mk-qadevice)).
+6. Prints its adb serial (`emulator-5554`).
 
 A cold boot takes about 1–3 minutes; a reused emulator about 20 s.
 
@@ -326,9 +413,15 @@ under cmd.exe, PowerShell or Git Bash.
 1. **Checks**, before anything is generated: the profile exists in
    `eas.json`; app.json pins the versionCode; the keystore is there and its
    certificate is `signingSha1` (`keytool`); `android/` is git-ignored;
-   **at least 4 GB of RAM is free** (otherwise it stops: close Brave and
-   other browsers, Android Studio, the emulator, other Node/Java
-   processes).
+   **`JAVA_HOME` is a JDK 17**: it has `bin\javac(.exe)` (a JRE has not)
+   and its `release` file (or `javac -version`) says 17. Otherwise it
+   stops with the cause and the fix, e.g. `setx JAVA_HOME "C:\Program
+   Files\Microsoft\jdk-17.0.18.8-hotspot"` when a JDK 17 is installed in
+   the usual places (Microsoft, Eclipse Adoptium, Zulu, Corretto…), else
+   `winget install Microsoft.OpenJDK.17`. On 2026-10-23 `JAVA_HOME` was a
+   JRE 21: Gradle failed after 24 minutes. **At least 4 GB of RAM is
+   free** (otherwise it stops: close Brave and other browsers, Android
+   Studio, the emulator, other Node/Java processes).
 2. **Prebuild**: `expo prebuild --platform android --clean --no-install`
    with the profile's `env` from `eas.json` (`extends` applied, as on
    EAS), `NODE_ENV=production`. If prebuild rewrites `package.json` or
@@ -340,20 +433,28 @@ under cmd.exe, PowerShell or Git Bash.
    `-Xmx3g`, `org.gradle.workers.max=2`, no parallel, no daemon, Kotlin
    in-process.
 4. **Gradle**: `gradlew assembleRelease --no-daemon --max-workers=2`, the
-   key's passwords in its environment.
+   key's passwords in its environment. Its output is shown live and its
+   last megabyte kept: when it fails, mk names the **probable cause** from
+   it instead of guessing: no Java compiler (a JRE), the wrong JDK version
+   (`Unsupported class file major version`, `requires Java 17`…), out of
+   memory (`Java heap space`, `Metaspace`, `GC overhead`, paging file), or
+   else the first lines of Gradle's own `* What went wrong:`.
 5. The APK is copied to `dist/`, `android/` is **deleted** (EAS would
    treat a leftover `android/` as a bare project), and the APK is verified
    like a release: package, versionName, versionCode, and certificate
    SHA-1 = `signingSha1`. An APK that fails is deleted.
 
-`--dry-run` runs every check, the key and RAM included, and prints
-prebuild and Gradle.
+`--dry-run` runs every check, the key, the JDK and RAM included, and
+prints prebuild and Gradle.
 
 ### Windows requirements and tips
 
 - **JDK 17** (Gradle for React Native 0.8x needs 17):
-  `winget install Microsoft.OpenJDK.17`, and set `JAVA_HOME` to it (mk
-  finds `keytool` there). Check: `java -version`, `"%JAVA_HOME%\bin\keytool" -help`.
+  `winget install Microsoft.OpenJDK.17`, and set `JAVA_HOME` to it for
+  good: `setx JAVA_HOME "C:\Program Files\Microsoft\jdk-17.0.18.8-hotspot"`
+  (then open a new terminal; mk finds `keytool` there too). A user
+  variable wins over a system one, so a system `JAVA_HOME` pointing at a
+  JRE can stay. Check: `mk build --local --profile preview --dry-run`.
 - **Android SDK** already set up for the emulator (`ANDROID_HOME`, e.g.
   `D:\Dev\Android\Sdk`): Gradle installs the platform, build-tools, NDK
   and CMake versions it needs on the first build (several GB, on that

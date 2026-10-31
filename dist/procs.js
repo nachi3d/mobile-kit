@@ -4,12 +4,18 @@
 //   procs.js mem                   → {"freeMb": …, "emulatorMb": …}
 //   procs.js kill-maestro <serial> → kills Maestro runs on that device
 //   procs.js kill-emulator <avd>   → kills that AVD's emulator processes
+//   procs.js kill-tree <pid>       → kills every process below <pid>
+//   procs.js guard <state file>    → starts the guard (guard.ts), detached
 //
 // emulatorMb is the private memory (Windows) or resident size (macOS,
 // Linux) of the qemu-system processes: the number that grew past 14 GB with
 // software rendering.
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { guardLoop } from './guard.js';
+import { descendants, killAll, listProcesses } from './proctree.js';
 const SAFE = /^[\w.-]+$/;
 function powershell(script) {
     const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
@@ -51,7 +57,26 @@ else if ((command === 'kill-maestro' || command === 'kill-emulator') && arg && S
     const n = command === 'kill-maestro' ? killMatching(['maestro', `--device ${arg}`]) : killMatching([`-avd ${arg}`]);
     console.log(String(n));
 }
+else if (command === 'kill-tree' && arg && /^\d+$/.test(arg)) {
+    // Everything below <pid> (not <pid> itself), deepest first.
+    const me = listProcesses().find((p) => p.pid === Number(arg));
+    console.log(String(killAll(descendants(listProcesses(), { pid: Number(arg), created: me?.created ?? 0 }).filter((p) => p.pid !== process.pid))));
+}
+else if (command === 'guard' && arg && fs.existsSync(arg)) {
+    // Launches the guard detached and returns: it is nobody's child, so
+    // killing mk's process tree leaves it running to clean up.
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'guard-loop', arg], { detached: true, stdio: 'ignore', windowsHide: true });
+    child.unref();
+    console.log(String(child.pid ?? 0));
+}
+else if (command === 'guard-loop' && arg) {
+    await guardLoop(arg).catch((e) => {
+        if (process.env.MK_GUARD_LOG)
+            fs.appendFileSync(process.env.MK_GUARD_LOG, `${new Date().toISOString()} error: ${e.stack ?? String(e)}\n`);
+        process.exit(1);
+    });
+}
 else {
-    console.error('Usage: procs.js mem | kill-maestro <serial> | kill-emulator <avd>');
+    console.error('Usage: procs.js mem | kill-maestro <serial> | kill-emulator <avd> | kill-tree <pid> | guard <state file>');
     process.exit(2);
 }
